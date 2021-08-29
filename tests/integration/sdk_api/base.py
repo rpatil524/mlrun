@@ -90,12 +90,15 @@ class TestMLRunIntegration:
             "make",
             args=["run-api"],
             env=self._extend_current_env({"MLRUN_VERSION": "test-integration"}),
+            cwd=TestMLRunIntegration.root_path,
         )
         output = self._run_command("docker", args=["ps", "--last", "1", "-q"],)
         container_id = output.strip()
         # retrieve container bind port + host
         output = self._run_command("docker", args=["port", container_id, "8080"])
-        host = output.strip()
+        # usually the output is something like '0.0.0.0:49154\n' but sometimes (in GH actions) it's something like
+        # '0.0.0.0:49154\n:::49154\n' for some reason, so just taking the first line
+        host = output.splitlines()[0]
         url = f"http://{host}"
         self._check_api_is_healthy(url)
         self._logger.info("Successfully started API", url=url)

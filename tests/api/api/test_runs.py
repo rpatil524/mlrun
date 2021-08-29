@@ -25,33 +25,58 @@ def test_run_with_nan_in_body(db: Session, client: TestClient) -> None:
     }
     uid = "some-uid"
     project = "some-project"
-    get_db().store_run(db, run_with_nan_float, uid, project)
+    mlrun.api.crud.Runs().store_run(db, run_with_nan_float, uid, project=project)
     resp = client.get(f"/api/run/{project}/{uid}")
     assert resp.status_code == HTTPStatus.OK.value
 
 
 def test_abort_run(db: Session, client: TestClient) -> None:
     project = "some-project"
-    run_in_progress = {"status": {"state": mlrun.runtimes.constants.RunStates.running}}
+    run_in_progress = {
+        "metadata": {"labels": {"kind": mlrun.runtimes.RuntimeKinds.job}},
+        "status": {"state": mlrun.runtimes.constants.RunStates.running},
+    }
     run_in_progress_uid = "in-progress-uid"
-    run_completed = {"status": {"state": mlrun.runtimes.constants.RunStates.completed}}
+    run_completed = {
+        "metadata": {"labels": {"kind": mlrun.runtimes.RuntimeKinds.job}},
+        "status": {"state": mlrun.runtimes.constants.RunStates.completed},
+    }
     run_completed_uid = "completed-uid"
-    run_aborted = {"status": {"state": mlrun.runtimes.constants.RunStates.aborted}}
+    run_aborted = {
+        "metadata": {"labels": {"kind": mlrun.runtimes.RuntimeKinds.job}},
+        "status": {"state": mlrun.runtimes.constants.RunStates.aborted},
+    }
     run_aborted_uid = "aborted-uid"
-    get_db().store_run(db, run_in_progress, "in-progress-uid", project)
-    get_db().store_run(db, run_completed, "completed-uid", project)
-    get_db().store_run(db, run_aborted, "aborted-uid", project)
-    mlrun.api.crud.Runtimes().delete_runtimes = unittest.mock.Mock()
+    run_dask = {
+        "metadata": {"labels": {"kind": mlrun.runtimes.RuntimeKinds.dask}},
+        "status": {"state": mlrun.runtimes.constants.RunStates.running},
+    }
+    run_dask_uid = "dask-uid"
+    for run, run_uid in [
+        (run_in_progress, run_in_progress_uid),
+        (run_completed, run_completed_uid),
+        (run_aborted, run_aborted_uid),
+        (run_dask, run_dask_uid),
+    ]:
+        mlrun.api.crud.Runs().store_run(db, run, run_uid, project=project)
+
+    mlrun.api.crud.RuntimeResources().delete_runtime_resources = unittest.mock.Mock()
     abort_body = {"status.state": mlrun.runtimes.constants.RunStates.aborted}
+    # completed is terminal state - should fail
     response = client.patch(f"/api/run/{project}/{run_completed_uid}", json=abort_body)
     assert response.status_code == HTTPStatus.CONFLICT.value
+    # aborted is terminal state - should fail
     response = client.patch(f"/api/run/{project}/{run_aborted_uid}", json=abort_body)
     assert response.status_code == HTTPStatus.CONFLICT.value
+    # dask kind not abortable - should fail
+    response = client.patch(f"/api/run/{project}/{run_dask_uid}", json=abort_body)
+    assert response.status_code == HTTPStatus.BAD_REQUEST.value
+    # running is ok - should succeed
     response = client.patch(
         f"/api/run/{project}/{run_in_progress_uid}", json=abort_body
     )
     assert response.status_code == HTTPStatus.OK.value
-    mlrun.api.crud.Runtimes().delete_runtimes.assert_called_once()
+    mlrun.api.crud.RuntimeResources().delete_runtime_resources.assert_called_once()
 
 
 def test_list_runs_times_filters(db: Session, client: TestClient) -> None:

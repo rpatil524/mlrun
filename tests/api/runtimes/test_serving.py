@@ -20,6 +20,15 @@ from .test_nuclio import TestNuclioRuntime
 
 
 class TestServingRuntime(TestNuclioRuntime):
+    def custom_setup_after_fixtures(self):
+        self._mock_nuclio_deploy_config()
+        self._mock_vault_functionality()
+        # Since most of the Serving runtime handling is done client-side, we'll mock the calls to remote-build
+        # and instead just call the deploy_nuclio_function() API which actually performs the
+        # deployment in this case. This will keep the tests' code mostly client-side oriented, but validations
+        # will be performed against the Nuclio spec created on the server side.
+        self._mock_db_remote_deploy_functions()
+
     def custom_setup(self):
         super().custom_setup()
         self.inline_secrets = {
@@ -29,13 +38,6 @@ class TestServingRuntime(TestNuclioRuntime):
         os.environ["ENV_SECRET1"] = "ENV SECRET!!!!"
 
         self.code_filename = str(self.assets_path / "serving_functions.py")
-
-        self._mock_vault_functionality()
-        # Since most of the Serving runtime handling is done client-side, we'll mock the calls to remote-build
-        # and instead just call the deploy_nuclio_function() API which actually performs the
-        # deployment in this case. This will keep the tests' code mostly client-side oriented, but validations
-        # will be performed against the Nuclio spec created on the server side.
-        self._mock_db_remote_deploy_functions()
 
     @staticmethod
     def _mock_db_remote_deploy_functions():
@@ -47,6 +49,8 @@ class TestServingRuntime(TestNuclioRuntime):
                         state="ready",
                         nuclio_name=f"nuclio-{func.metadata.name}",
                         address="http://127.0.0.1:1234",
+                        external_invocation_urls=["http://somewhere-far-away.com"],
+                        internal_invocation_urls=["http://127.0.0.1:1234"],
                     )
                 }
             }

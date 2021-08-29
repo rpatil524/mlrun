@@ -44,8 +44,8 @@ MLRun provides the following key benefits:
 - **Feature management** – ingestion, preparation, and monitoring
 - **Works anywhere** – your local IDE, multi-cloud, or on-prem
 
-Table Of Content
-----------------
+Table Of Contents
+-------------------
 
 .. toctree::
    :maxdepth: 1
@@ -59,32 +59,42 @@ Table Of Content
 
 .. toctree::
    :maxdepth: 1
-   :caption: ML Pipelines:
-
-   job-submission-and-tracking
-   hyper-params
-   projects
-   serving/index
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Serverless Runtimes:
+   :caption: Functions and ML Pipelines:
 
    runtimes/functions
-   runtimes/mlrun_jobs
-   runtimes/dask-overview
-   runtimes/horovod
-   runtimes/spark-operator
+   hyper-params
+   projects/overview
+   ci-pipeline
    load-from-marketplace
+   secrets
+   runtimes/node-affinity
 
 .. toctree::
    :maxdepth: 1
-   :caption: Feature & Artifacts Store:
+   :caption: Online Pipelines & Serving:
+
+   serving/index
+   model_monitoring/index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Feature Store (beta):
+
+   feature-store/feature-store
+   feature-store/feature-sets
+   feature-store/transformations
+   feature-store/feature-vectors
+   feature-store/training-serving
+   feature-store/basic-demo
+   feature-store/end-to-end-demo/index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Artifact Management:
 
    store/datastore
    store/artifacts
    store/models
-   store/feature-store-demo
 
 .. toctree::
    :maxdepth: 1

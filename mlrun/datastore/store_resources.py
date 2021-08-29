@@ -18,9 +18,9 @@ import mlrun
 from mlrun.config import config
 from mlrun.utils.helpers import parse_artifact_uri, parse_versioned_object_uri
 
+from ..platforms.iguazio import parse_v3io_path
 from ..utils import DB_SCHEMA, StorePrefix
 from .targets import get_online_target
-from .v3io import parse_v3io_path
 
 
 def is_store_uri(url):
@@ -79,7 +79,7 @@ class ResourceCache:
             self._tabels[uri] = Table(
                 uri,
                 V3ioDriver(webapi=endpoint),
-                flush_interval_secs=mlrun.mlconf.feature_store.default_flush_interval,
+                flush_interval_secs=mlrun.mlconf.feature_store.flush_interval,
             )
             return self._tabels[uri]
 
@@ -92,7 +92,7 @@ class ResourceCache:
                 target = get_online_target(resource)
                 if not target:
                     raise mlrun.errors.MLRunInvalidArgumentError(
-                        f"resource {uri} does not have an online data source"
+                        f"resource {uri} does not have an online data target"
                     )
                 self._tabels[uri] = target.get_table_object()
                 return self._tabels[uri]

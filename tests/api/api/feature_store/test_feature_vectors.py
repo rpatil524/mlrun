@@ -1,8 +1,15 @@
+import typing
+import unittest.mock
 from http import HTTPStatus
 from uuid import uuid4
 
+import deepdiff
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
+
+import mlrun.api.api.endpoints.feature_store
+import mlrun.api.schemas
+import mlrun.api.utils.clients.opa
 
 from .base import (
     _assert_diff_as_expected_except_for_specific_metadata,
@@ -22,7 +29,11 @@ def _generate_feature_vector(name):
             "extra_metadata": 100,
         },
         "spec": {
-            "features": ["feature_set:*", "feature_set:something", "just_a_feature"],
+            "features": [
+                "feature_set.*",
+                "feature_set.something",
+                "feature_set.just_a_feature",
+            ],
             "description": "just a bunch of features",
             "extra_spec": True,
         },
@@ -50,11 +61,14 @@ def test_feature_vector_create(db: Session, client: TestClient) -> None:
     name = "feature_set1"
     feature_vector = _generate_feature_vector(name)
     feature_vector["metadata"]["project"] = project_name
+    feature_vector["metadata"].pop("tag")
 
     feature_vector_response = _create_and_assert_feature_vector(
         client, project_name, feature_vector, True
     )
-    allowed_added_fields = ["uid", "updated", "tag"]
+    allowed_added_fields = ["uid", "created", "updated", "tag"]
+    assert feature_vector_response["metadata"]["tag"] == "latest"
+
     _assert_diff_as_expected_except_for_specific_metadata(
         feature_vector, feature_vector_response, allowed_added_fields
     )
@@ -73,7 +87,6 @@ def test_feature_vector_create(db: Session, client: TestClient) -> None:
     )
     assert feature_vector_response.status_code == HTTPStatus.OK.value
     # When querying by uid, tag will not be returned
-    feature_vector["metadata"].pop("tag")
     _assert_diff_as_expected_except_for_specific_metadata(
         feature_vector, feature_vector_response.json(), allowed_added_fields
     )
@@ -106,7 +119,7 @@ def test_list_feature_vectors(db: Session, client: TestClient) -> None:
 
     _list_and_assert_objects(client, "feature_vectors", project_name, None, count)
     _list_and_assert_objects(
-        client, "feature_vectors", project_name, "name=ooga", ooga_name_count
+        client, "feature_vectors", project_name, "name=~ooga", ooga_name_count
     )
     _list_and_assert_objects(
         client,
@@ -128,7 +141,7 @@ def test_list_feature_vectors(db: Session, client: TestClient) -> None:
         client,
         "feature_vectors",
         project_name,
-        "state=dead&name=booga",
+        "state=dead&name=~booga",
         ooga_name_count,
     )
     _list_and_assert_objects(client, "feature_vectors", "wrong_project", None, 0)
@@ -154,7 +167,15 @@ def test_feature_vector_store(db: Session, client: TestClient) -> None:
     response = _assert_store_feature_vector(
         client, project_name, name, "tag1", feature_vector
     )
+    assert response["metadata"]["tag"] == "tag1"
     uid = response["metadata"]["uid"]
+
+    # Put same object using uid - should not return tag
+    response = _assert_store_feature_vector(
+        client, project_name, name, uid, feature_vector
+    )
+    assert response["metadata"]["tag"] is None
+
     # Change fields that will not affect the uid, verify object is overwritten
     feature_vector["status"]["state"] = "modified"
 
@@ -338,7 +359,7 @@ def test_unversioned_feature_vector_actions(db: Session, client: TestClient) -> 
         client, project_name, feature_vector, versioned=False
     )
 
-    allowed_added_fields = ["uid", "updated", "tag", "project"]
+    allowed_added_fields = ["uid", "created", "updated", "tag", "project"]
     _assert_diff_as_expected_except_for_specific_metadata(
         feature_vector, feature_vector_response, allowed_added_fields
     )
@@ -393,4 +414,49 @@ def test_feature_vector_list_partition_by(db: Session, client: TestClient) -> No
 
     _test_partition_by_for_feature_store_objects(
         client, "feature_vectors", project_name, count
+    )
+
+
+def test_verify_feature_vector_features_permissions(
+    db: Session, client: TestClient
+) -> None:
+    project = "some-project"
+    features = [
+        "without-project.*",
+        "without-project.with-feature-name",
+        "without-project.with-feature-alias as some-alias",
+        "without-project:with-tag.*",
+        "with-project/name.*",
+        "with-project/name:and-tag.*",
+        "with-project/name@and-uid.*",
+        "store://feature-sets/with-project/name:and-tag.*",
+        "store://feature-sets/with-project/name@and-uid.*",
+        "store://feature-sets/without-project.with-feature-alias as some-alias",
+    ]
+    label_feature = "some-feature-set.some-feature"
+
+    def _verify_queried_resources(
+        resource_type: mlrun.api.schemas.AuthorizationResourceTypes,
+        resources: typing.List,
+        project_and_resource_name_extractor: typing.Callable,
+        action: mlrun.api.schemas.AuthorizationAction,
+        auth_info: mlrun.api.schemas.AuthInfo,
+        raise_on_forbidden: bool = True,
+    ):
+        expected_resources = [
+            (project, "without-project"),
+            ("with-project", "name"),
+            (project, "some-feature-set"),
+        ]
+        assert (
+            deepdiff.DeepDiff(expected_resources, resources, ignore_order=True,) == {}
+        )
+
+    mlrun.api.utils.clients.opa.Client().query_project_resources_permissions = unittest.mock.Mock(
+        side_effect=_verify_queried_resources
+    )
+    mlrun.api.api.endpoints.feature_store._verify_feature_vector_features_permissions(
+        mlrun.api.schemas.AuthInfo(),
+        project,
+        {"spec": {"features": features, "label_feature": label_feature}},
     )

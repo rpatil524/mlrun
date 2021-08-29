@@ -5,10 +5,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 import mlrun
-from mlrun.api.api.utils import _parse_submit_run_body
+import mlrun.api.schemas
+from mlrun.api.api.utils import _generate_function_and_task_from_submit_run_body
 
 
-def test_parse_submit_job_body_override_values(db: Session, client: TestClient):
+def test_generate_function_and_task_from_submit_run_body_body_override_values(
+    db: Session, client: TestClient
+):
     task_name = "task_name"
     task_project = "task-project"
     project, function_name, function_tag, original_function = _mock_original_function(
@@ -62,10 +65,87 @@ def test_parse_submit_job_body_override_values(db: Session, client: TestClient):
                 },
                 "image_pull_policy": "Always",
                 "replicas": "3",
+                "node_name": "k8s-node1",
+                "node_selector": {"kubernetes.io/hostname": "k8s-node1"},
+                "affinity": {
+                    "nodeAffinity": {
+                        "preferredDuringSchedulingIgnoredDuringExecution": [
+                            {
+                                "preference": {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "some_node_label",
+                                            "operator": "In",
+                                            "values": [
+                                                "possible-label-value-1",
+                                                "possible-label-value-2",
+                                            ],
+                                        }
+                                    ]
+                                },
+                                "weight": 1,
+                            }
+                        ],
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "some_node_label",
+                                            "operator": "In",
+                                            "values": [
+                                                "required-label-value-1",
+                                                "required-label-value-2",
+                                            ],
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                    },
+                    "podAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": [
+                            {
+                                "labelSelector": {
+                                    "matchLabels": {
+                                        "some-pod-label-key": "some-pod-label-value"
+                                    }
+                                },
+                                "namespaces": ["namespace-a", "namespace-b"],
+                                "topologyKey": "key-1",
+                            }
+                        ]
+                    },
+                    "podAntiAffinity": {
+                        "preferredDuringSchedulingIgnoredDuringExecution": [
+                            {
+                                "podAffinityTerm": {
+                                    "labelSelector": {
+                                        "matchExpressions": [
+                                            {
+                                                "key": "some_pod_label",
+                                                "operator": "NotIn",
+                                                "values": [
+                                                    "forbidden-label-value-1",
+                                                    "forbidden-label-value-2",
+                                                ],
+                                            }
+                                        ]
+                                    },
+                                    "namespaces": ["namespace-c"],
+                                    "topologyKey": "key-2",
+                                },
+                                "weight": 1,
+                            }
+                        ]
+                    },
+                },
             }
         },
     }
-    parsed_function_object, task = _parse_submit_run_body(db, submit_job_body)
+    parsed_function_object, task = _generate_function_and_task_from_submit_run_body(
+        db, mlrun.api.schemas.AuthInfo(), submit_job_body
+    )
     assert parsed_function_object.metadata.name == function_name
     assert parsed_function_object.metadata.project == project
     assert parsed_function_object.metadata.tag == function_tag
@@ -90,9 +170,31 @@ def test_parse_submit_job_body_override_values(db: Session, client: TestClient):
         parsed_function_object, submit_job_body, original_function
     )
     _assert_env_vars(parsed_function_object, submit_job_body, original_function)
+    assert (
+        parsed_function_object.spec.node_name
+        == submit_job_body["function"]["spec"]["node_name"]
+    )
+    assert (
+        DeepDiff(
+            parsed_function_object.spec.node_selector,
+            submit_job_body["function"]["spec"]["node_selector"],
+            ignore_order=True,
+        )
+        == {}
+    )
+    assert (
+        DeepDiff(
+            parsed_function_object.spec._get_sanitized_affinity(),
+            submit_job_body["function"]["spec"]["affinity"],
+            ignore_order=True,
+        )
+        == {}
+    )
 
 
-def test_parse_submit_job_body_keep_resources(db: Session, client: TestClient):
+def test_generate_function_and_task_from_submit_run_body_keep_resources(
+    db: Session, client: TestClient
+):
     task_name = "task_name"
     task_project = "task-project"
     project, function_name, function_tag, original_function = _mock_original_function(
@@ -105,7 +207,9 @@ def test_parse_submit_job_body_keep_resources(db: Session, client: TestClient):
         },
         "function": {"spec": {"resources": {"limits": {}, "requests": {}}}},
     }
-    parsed_function_object, task = _parse_submit_run_body(db, submit_job_body)
+    parsed_function_object, task = _generate_function_and_task_from_submit_run_body(
+        db, mlrun.api.schemas.AuthInfo(), submit_job_body
+    )
     assert parsed_function_object.metadata.name == function_name
     assert parsed_function_object.metadata.project == project
     assert parsed_function_object.metadata.tag == function_tag
@@ -127,7 +231,7 @@ def test_parse_submit_job_body_keep_resources(db: Session, client: TestClient):
     )
 
 
-def test_parse_submit_job_imported_function_project_assignment(
+def test_generate_function_and_task_from_submit_run_body_imported_function_project_assignment(
     db: Session, client: TestClient, monkeypatch
 ):
     task_name = "task_name"
@@ -140,7 +244,9 @@ def test_parse_submit_job_imported_function_project_assignment(
         },
         "function": {"spec": {"resources": {"limits": {}, "requests": {}}}},
     }
-    parsed_function_object, task = _parse_submit_run_body(db, submit_job_body)
+    parsed_function_object, task = _generate_function_and_task_from_submit_run_body(
+        db, mlrun.api.schemas.AuthInfo(), submit_job_body
+    )
     assert parsed_function_object.metadata.project == task_project
 
 

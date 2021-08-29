@@ -18,6 +18,10 @@ from os import path, remove
 from tempfile import mktemp
 from urllib.parse import urlparse
 
+import mlrun.api.schemas
+import mlrun.errors
+import mlrun.runtimes.utils
+
 from .config import config
 from .datastore import store_manager
 from .k8s_utils import BasePod, get_k8s_helper
@@ -41,10 +45,10 @@ def make_dockerfile(
     if src_dir:
         dock += f"RUN mkdir -p {workdir}\n"
         dock += f"WORKDIR {workdir}\n"
-        dock += "ADD {src_dir} {workdir}\n"
+        dock += f"ADD {src_dir} {workdir}\n"
         dock += f"ENV PYTHONPATH {workdir}\n"
     if requirements:
-        dock += f"RUN pip install -r {requirements}\n"
+        dock += f"RUN python -m pip install -r {requirements}\n"
     if commands:
         dock += "".join([f"RUN {command}\n" for command in commands])
     if extra:
@@ -54,6 +58,7 @@ def make_dockerfile(
 
 
 def make_kaniko_pod(
+    project: str,
     context,
     dest,
     dockerfile=None,
@@ -64,6 +69,7 @@ def make_kaniko_pod(
     secret_name=None,
     name="",
     verbose=False,
+    builder_env=None,
 ):
 
     if not dockertext and not dockerfile:
@@ -84,7 +90,9 @@ def make_kaniko_pod(
         config.httpdb.builder.kaniko_image,
         args=args,
         kind="build",
+        project=project,
     )
+    kpod.env = builder_env
 
     if secret_name:
         items = [{"key": ".dockerconfigjson", "path": "config.json"}]
@@ -130,6 +138,7 @@ def upload_tarball(source_dir, target, secrets=None):
 
 
 def build_image(
+    project: str,
     dest,
     commands=None,
     source="",
@@ -147,6 +156,7 @@ def build_image(
     name="",
     extra=None,
     verbose=False,
+    builder_env=None,
 ):
 
     if registry:
@@ -171,7 +181,6 @@ def build_image(
         requirements_list = None
         requirements_path = requirements
 
-    base_image = base_image or config.default_image
     if with_mlrun:
         commands = commands or []
         commands.append(_resolve_mlrun_install_command(mlrun_version_specifier))
@@ -194,8 +203,14 @@ def build_image(
     elif source and "://" in source and not v3io:
         context = source
     elif source:
+        parsed_url = urlparse(source)
         if v3io:
-            source = urlparse(source).path
+            source = parsed_url.path
+        elif source.startswith("git://"):
+            # if the user provided branch (w/o refs/..) we add the "refs/.."
+            fragment = parsed_url.fragment or ""
+            if not fragment.startswith("refs/"):
+                source = source.replace("#" + fragment, f"#refs/heads/{fragment}")
         to_mount = True
         if source.endswith(".tar.gz"):
             source, src_dir = path.split(source)
@@ -211,6 +226,7 @@ def build_image(
     )
 
     kpod = make_kaniko_pod(
+        project,
         context,
         dest,
         dockertext=dock,
@@ -220,6 +236,7 @@ def build_image(
         secret_name=secret_name,
         name=name,
         verbose=verbose,
+        builder_env=builder_env,
     )
 
     if to_mount:
@@ -250,27 +267,53 @@ def _resolve_mlrun_install_command(mlrun_version_specifier):
             mlrun_version_specifier = (
                 f"{config.package_path}[complete]=={config.version}"
             )
-    return f'pip install "{mlrun_version_specifier}"'
+    return f'python -m pip install "{mlrun_version_specifier}"'
 
 
-def build_runtime(runtime, with_mlrun, mlrun_version_specifier, interactive=False):
+def build_runtime(
+    runtime,
+    with_mlrun,
+    mlrun_version_specifier,
+    skip_deployed,
+    interactive=False,
+    builder_env=None,
+):
     build = runtime.spec.build
     namespace = runtime.metadata.namespace
+    project = runtime.metadata.project
+    if skip_deployed and runtime.is_deployed:
+        runtime.status.state = mlrun.api.schemas.FunctionState.ready
+        return True
+    if not build.source and not build.commands and not build.extra and not with_mlrun:
+        if not runtime.spec.image:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "noting to build and image is not specified, "
+                "please set the function image or build args"
+            )
+        runtime.status.state = mlrun.api.schemas.FunctionState.ready
+        return True
+
+    build.image = build.image or mlrun.runtimes.utils.generate_function_image_name(
+        runtime
+    )
+    runtime.status.state = ""
+
     inline = None  # noqa: F841
     if build.functionSourceCode:
         inline = b64decode(build.functionSourceCode).decode("utf-8")  # noqa: F841
     if not build.image:
-        raise ValueError(
+        raise mlrun.errors.MLRunInvalidArgumentError(
             "build spec must have a target image, set build.image = <target image>"
         )
     logger.info(f"building image ({build.image})")
 
     name = normalize_name(f"mlrun-build-{runtime.metadata.name}")
-    base_image = enrich_image_url(build.base_image or "mlrun/mlrun")
+    base_image = enrich_image_url(build.base_image or config.default_base_image)
     if not build.base_image:
         with_mlrun = False
 
     status = build_image(
+        project,
         build.image,
         base_image=base_image,
         commands=build.commands,
@@ -284,23 +327,25 @@ def build_runtime(runtime, with_mlrun, mlrun_version_specifier, interactive=Fals
         mlrun_version_specifier=mlrun_version_specifier,
         extra=build.extra,
         verbose=runtime.verbose,
+        builder_env=builder_env,
     )
     runtime.status.build_pod = None
     if status == "skipped":
-        runtime.spec.image = build.base_image
-        runtime.status.state = "ready"
+        runtime.spec.image = base_image
+        runtime.status.state = mlrun.api.schemas.FunctionState.ready
         return True
 
     if status.startswith("build:"):
-        runtime.status.state = "build"
+        runtime.status.state = mlrun.api.schemas.FunctionState.deploying
         runtime.status.build_pod = status[6:]
         return False
 
     logger.info(f"build completed with {status}")
     if status in ["failed", "error"]:
-        raise ValueError(f" build {status}!")
+        runtime.status.state = mlrun.api.schemas.FunctionState.error
+        return False
 
     local = "" if build.secret or build.image.startswith(".") else "."
     runtime.spec.image = local + build.image
-    runtime.status.state = "ready"
+    runtime.status.state = mlrun.api.schemas.FunctionState.ready
     return True

@@ -26,12 +26,14 @@ from .execution import MLClientCtx
 from .model import NewTask, RunObject, RunTemplate, new_task
 from .platforms import (
     VolumeMount,
+    auto_mount,
     mount_v3io,
     mount_v3io_extended,
     mount_v3io_legacy,
     v3io_cred,
 )
-from .projects import load_project, new_project
+from .projects import ProjectMetadata, get_or_create_project, load_project, new_project
+from .projects.project import _add_username_to_project_name_if_needed
 from .run import (
     code_to_function,
     function_to_module,
@@ -80,8 +82,9 @@ def set_environment(
 
     example::
 
+        from os import path
         artifact_path = set_environment(project='my-project')
-        data_subpath = os.join(artifact_path, 'data')
+        data_subpath = path.join(artifact_path, 'data')
 
     :param api_path:       location/url of mlrun api service
     :param artifact_path:  path/url for storing experiment artifacts
@@ -105,11 +108,15 @@ def set_environment(
     if access_key:
         environ["V3IO_ACCESS_KEY"] = access_key
 
-    if project and user_project:
-        user = environ.get("V3IO_USERNAME") or getpass.getuser()
-        project = f"{project}-{user}"
+    project = _add_username_to_project_name_if_needed(project, user_project)
+    if project:
+        ProjectMetadata.validate_project_name(project)
 
     mlconf.default_project = project or mlconf.default_project
+    # We want to ensure the project exists, and verify we're authorized to work on it
+    # if it doesn't exist this will create it (and obviously if we created it, we're authorized to work on it)
+    # if it does exist - this will get it, which will fail if we're not authorized to work on it
+    get_or_create_project(mlconf.default_project, "./")
 
     if not mlconf.artifact_path and not artifact_path:
         raise ValueError("please specify a valid artifact_path")

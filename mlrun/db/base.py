@@ -95,6 +95,7 @@ class RunDBInterface(ABC):
         since=None,
         until=None,
         iter: int = None,
+        best_iteration: bool = False,
     ):
         pass
 
@@ -158,7 +159,7 @@ class RunDBInterface(ABC):
     def list_projects(
         self,
         owner: str = None,
-        format_: schemas.Format = schemas.Format.full,
+        format_: schemas.ProjectsFormat = schemas.ProjectsFormat.full,
         labels: List[str] = None,
         state: schemas.ProjectState = None,
     ) -> schemas.ProjectsOutput:
@@ -312,7 +313,9 @@ class RunDBInterface(ABC):
         sort_by: str = "",
         page_token: str = "",
         filter_: str = "",
-        format_: Union[str, schemas.Format] = schemas.Format.metadata_only,
+        format_: Union[
+            str, schemas.PipelinesFormat
+        ] = schemas.PipelinesFormat.metadata_only,
         page_size: int = None,
     ) -> schemas.PipelinesOutput:
         pass
@@ -328,7 +331,8 @@ class RunDBInterface(ABC):
     ):
         pass
 
-    def get_project_secrets(
+    @abstractmethod
+    def list_project_secrets(
         self,
         project: str,
         token: str,
@@ -337,6 +341,28 @@ class RunDBInterface(ABC):
         ] = schemas.SecretProviderName.vault,
         secrets: List[str] = None,
     ) -> schemas.SecretsData:
+        pass
+
+    @abstractmethod
+    def list_project_secret_keys(
+        self,
+        project: str,
+        provider: Union[
+            str, schemas.SecretProviderName
+        ] = schemas.SecretProviderName.vault,
+        token: str = None,
+    ) -> schemas.SecretKeysData:
+        pass
+
+    @abstractmethod
+    def delete_project_secrets(
+        self,
+        project: str,
+        provider: Union[
+            str, schemas.SecretProviderName
+        ] = schemas.SecretProviderName.vault,
+        secrets: List[str] = None,
+    ):
         pass
 
     @abstractmethod
@@ -351,7 +377,7 @@ class RunDBInterface(ABC):
         pass
 
     @abstractmethod
-    def create_or_patch(
+    def create_or_patch_model_endpoint(
         self,
         project: str,
         endpoint_id: str,
@@ -361,13 +387,13 @@ class RunDBInterface(ABC):
         pass
 
     @abstractmethod
-    def delete_endpoint_record(
+    def delete_model_endpoint_record(
         self, project: str, endpoint_id: str, access_key: Optional[str] = None
     ):
         pass
 
     @abstractmethod
-    def list_endpoints(
+    def list_model_endpoints(
         self,
         project: str,
         model: Optional[str] = None,
@@ -381,7 +407,7 @@ class RunDBInterface(ABC):
         pass
 
     @abstractmethod
-    def get_endpoint(
+    def get_model_endpoint(
         self,
         project: str,
         endpoint_id: str,
@@ -390,5 +416,58 @@ class RunDBInterface(ABC):
         metrics: Optional[List[str]] = None,
         features: bool = False,
         access_key: Optional[str] = None,
+    ):
+        pass
+
+    @abstractmethod
+    def create_marketplace_source(
+        self, source: Union[dict, schemas.IndexedMarketplaceSource]
+    ):
+        pass
+
+    @abstractmethod
+    def store_marketplace_source(
+        self, source_name: str, source: Union[dict, schemas.IndexedMarketplaceSource]
+    ):
+        pass
+
+    @abstractmethod
+    def list_marketplace_sources(self):
+        pass
+
+    @abstractmethod
+    def get_marketplace_source(self, source_name: str):
+        pass
+
+    @abstractmethod
+    def delete_marketplace_source(self, source_name: str):
+        pass
+
+    @abstractmethod
+    def get_marketplace_catalog(
+        self,
+        source_name: str,
+        channel: str = None,
+        version: str = None,
+        tag: str = None,
+        force_refresh: bool = False,
+    ):
+        pass
+
+    @abstractmethod
+    def get_marketplace_item(
+        self,
+        source_name: str,
+        item_name: str,
+        channel: str = "development",
+        version: str = None,
+        tag: str = "latest",
+        force_refresh: bool = False,
+    ):
+        pass
+
+    @abstractmethod
+    def verify_authorization(
+        self, authorization_verification_input: schemas.AuthorizationVerificationInput
     ):
         pass

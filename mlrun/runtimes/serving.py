@@ -23,9 +23,9 @@ from ..model import ObjectList
 from ..secrets import SecretsStore
 from ..serving.server import GraphServer, create_graph_server
 from ..serving.states import (
-    RootFlowState,
-    RouterState,
-    StateKinds,
+    RootFlowStep,
+    RouterStep,
+    StepKinds,
     graph_root_setter,
     new_model_endpoint,
     new_remote_endpoint,
@@ -106,6 +106,8 @@ class ServingSpec(NuclioSpec):
         error_stream=None,
         track_models=None,
         secret_sources=None,
+        default_content_type=None,
+        mount_applied=False,
     ):
 
         super().__init__(
@@ -131,11 +133,12 @@ class ServingSpec(NuclioSpec):
             service_account=service_account,
             readiness_timeout=readiness_timeout,
             build=build,
+            mount_applied=mount_applied,
         )
 
         self.models = models or {}
         self._graph = None
-        self.graph: Union[RouterState, RootFlowState] = graph
+        self.graph: Union[RouterStep, RootFlowStep] = graph
         self.parameters = parameters or {}
         self.default_class = default_class
         self.load_mode = load_mode
@@ -145,9 +148,10 @@ class ServingSpec(NuclioSpec):
         self.error_stream = error_stream
         self.track_models = track_models
         self.secret_sources = secret_sources or []
+        self.default_content_type = default_content_type
 
     @property
-    def graph(self) -> Union[RouterState, RootFlowState]:
+    def graph(self) -> Union[RouterStep, RootFlowStep]:
         """states graph, holding the serving workflow/DAG topology"""
         return self._graph
 
@@ -180,7 +184,7 @@ class ServingRuntime(RemoteRuntime):
 
     def set_topology(
         self, topology=None, class_name=None, engine=None, exist_ok=False, **class_args,
-    ) -> Union[RootFlowState, RouterState]:
+    ) -> Union[RootFlowStep, RouterStep]:
         """set the serving graph topology (router/flow) and root class or params
 
         example::
@@ -207,16 +211,16 @@ class ServingRuntime(RemoteRuntime):
 
         :return graph object (fn.spec.graph)
         """
-        topology = topology or StateKinds.router
+        topology = topology or StepKinds.router
         if self.spec.graph and not exist_ok:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "graph topology is already set, cannot be overwritten"
             )
 
-        if topology == StateKinds.router:
-            self.spec.graph = RouterState(class_name=class_name, class_args=class_args)
-        elif topology == StateKinds.flow:
-            self.spec.graph = RootFlowState(engine=engine)
+        if topology == StepKinds.router:
+            self.spec.graph = RouterStep(class_name=class_name, class_args=class_args)
+        elif topology == StepKinds.flow:
+            self.spec.graph = RootFlowStep(engine=engine)
         else:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 f"unsupported topology {topology}, use 'router' or 'flow'"
@@ -281,7 +285,7 @@ class ServingRuntime(RemoteRuntime):
         if not graph:
             graph = self.set_topology()
 
-        if graph.kind != StateKinds.router:
+        if graph.kind != StepKinds.router:
             raise ValueError("models can only be added under router state")
 
         if not model_path and not model_url:
@@ -289,7 +293,7 @@ class ServingRuntime(RemoteRuntime):
         class_name = class_name or self.spec.default_class
         if class_name and not isinstance(class_name, str):
             raise ValueError(
-                "class name must be a string (name ot module.submodule.name)"
+                "class name must be a string (name of module.submodule.name)"
             )
         if model_path and not class_name:
             raise ValueError("model_path must be provided with class_name")
@@ -337,7 +341,7 @@ class ServingRuntime(RemoteRuntime):
                 group = stream.options.get("group", "serving")
 
                 child_function = self._spec.function_refs[function_name]
-                child_function.function_object().add_v3io_stream_trigger(
+                child_function.function_object.add_v3io_stream_trigger(
                     stream.path, group=group, shards=stream.shards
                 )
 
@@ -400,7 +404,7 @@ class ServingRuntime(RemoteRuntime):
         self.spec.secret_sources.append({"kind": kind, "source": source})
         return self
 
-    def add_vault_config_to_spec(self):
+    def add_secrets_config_to_spec(self):
         if self.spec.secret_sources:
             self._secrets = SecretsStore.from_list(self.spec.secret_sources)
             if self._secrets.has_vault_source():
@@ -409,14 +413,22 @@ class ServingRuntime(RemoteRuntime):
                 self._add_azure_vault_params_to_spec(
                     self._secrets.get_azure_vault_k8s_secret()
                 )
+            k8s_secrets = self._secrets.get_k8s_secrets()
+            if k8s_secrets is not None:
+                self._add_project_k8s_secrets_to_spec(
+                    k8s_secrets, project=self.metadata.project
+                )
 
-    def deploy(self, dashboard="", project="", tag="", verbose=False):
+    def deploy(
+        self, dashboard="", project="", tag="", verbose=False, disable_auto_mount=False
+    ):
         """deploy model serving function to a local/remote cluster
 
         :param dashboard: remote nuclio dashboard url (blank for local or auto detection)
-        :param project:   optional, overide function specified project name
+        :param project:   optional, override function specified project name
         :param tag:       specify unique function tag (a different function service is created for every tag)
         :param verbose:   verbose logging
+        :param disable_auto_mount: Avoid applying auto-mount to function prior to deployment (default is False)
         """
         load_mode = self.spec.load_mode
         if load_mode and load_mode not in ["sync", "async"]:
@@ -424,7 +436,7 @@ class ServingRuntime(RemoteRuntime):
         if not self.spec.graph:
             raise ValueError("nothing to deploy, .spec.graph is none, use .add_model()")
 
-        if self.spec.graph.kind != StateKinds.router:
+        if self.spec.graph.kind != StepKinds.router:
             # initialize or create required streams/queues
             self.spec.graph.check_and_process_graph()
             self.spec.graph.init_queues()
@@ -442,7 +454,13 @@ class ServingRuntime(RemoteRuntime):
             self._deploy_function_refs()
             logger.info(f"deploy root function {self.metadata.name} ...")
 
-        return super().deploy(dashboard, project, tag, verbose=verbose)
+        return super().deploy(
+            dashboard,
+            project,
+            tag,
+            verbose=verbose,
+            disable_auto_mount=disable_auto_mount,
+        )
 
     def _get_runtime_env(self):
         env = super()._get_runtime_env()
@@ -452,12 +470,13 @@ class ServingRuntime(RemoteRuntime):
             "function_uri": self._function_uri(),
             "version": "v2",
             "parameters": self.spec.parameters,
-            "graph": self.spec.graph.to_dict(),
+            "graph": self.spec.graph.to_dict() if self.spec.graph else {},
             "load_mode": self.spec.load_mode,
             "functions": function_name_uri_map,
             "graph_initializer": self.spec.graph_initializer,
             "error_stream": self.spec.error_stream,
             "track_models": self.spec.track_models,
+            "default_content_type": self.spec.default_content_type,
         }
 
         if self.spec.secret_sources:
@@ -468,13 +487,13 @@ class ServingRuntime(RemoteRuntime):
         return env
 
     def to_mock_server(
-        self, namespace=None, current_function=None, **kwargs
+        self, namespace=None, current_function="*", **kwargs
     ) -> GraphServer:
         """create mock server object for local testing/emulation
 
         :param namespace: classes search namespace, use globals() for current notebook
         :param log_level: log level (error | info | debug)
-        :param current_function: specify if you want to simulate a child function
+        :param current_function: specify if you want to simulate a child function, * for all functions
         """
 
         server = create_graph_server(
@@ -487,7 +506,14 @@ class ServingRuntime(RemoteRuntime):
             track_models=self.spec.track_models,
             function_uri=self._function_uri(),
             secret_sources=self.spec.secret_sources,
+            default_content_type=self.spec.default_content_type,
             **kwargs,
         )
-        server.init(None, namespace or get_caller_globals(), logger=logger)
+        server.init_states(
+            context=None,
+            namespace=namespace or get_caller_globals(),
+            logger=logger,
+            is_mock=True,
+        )
+        server.init_object(namespace or get_caller_globals())
         return server

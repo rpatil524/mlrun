@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import enum
 import hashlib
 import inspect
 import json
@@ -32,6 +33,7 @@ from pandas._libs.tslibs.timestamps import Timestamp
 from tabulate import tabulate
 from yaml.representer import RepresenterError
 
+import mlrun
 import mlrun.errors
 import mlrun.utils.version.version
 
@@ -90,13 +92,13 @@ try:
     import IPython
 
     ipy = IPython.get_ipython()
-    if ipy:
+    # if its IPython terminal ignore (cant show html)
+    if ipy and "Terminal" not in str(type(ipy)):
         is_ipython = True
 except ImportError:
     pass
 
 if is_ipython and config.nest_asyncio_enabled in ["1", "True"]:
-
     # bypass Jupyter asyncio bug
     import nest_asyncio
 
@@ -113,7 +115,9 @@ class run_keys:
     secrets = "secret_sources"
 
 
-def verify_field_regex(field_name, field_value, patterns):
+def verify_field_regex(
+    field_name, field_value, patterns, raise_on_failure: bool = True
+) -> bool:
     logger.debug(
         "Validating field against patterns",
         field_name=field_name,
@@ -123,15 +127,39 @@ def verify_field_regex(field_name, field_value, patterns):
 
     for pattern in patterns:
         if not re.match(pattern, str(field_value)):
-            logger.warn(
+            log_func = logger.warn if raise_on_failure else logger.debug
+            log_func(
                 "Field is malformed. Does not match required pattern",
                 field_name=field_name,
                 field_value=field_value,
                 pattern=pattern,
             )
-            raise mlrun.errors.MLRunInvalidArgumentError(
-                f"Field {field_name} is malformed. Does not match required pattern: {pattern}"
-            )
+            if raise_on_failure:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"Field '{field_name}' is malformed. Does not match required pattern: {pattern}"
+                )
+            else:
+                return False
+    return True
+
+
+# Verifying that a field input is of the expected type. If not the method raises a detailed MLRunInvalidArgumentError
+def verify_field_of_type(field_name: str, field_value, expected_type: type):
+    if not isinstance(field_value, expected_type):
+        raise mlrun.errors.MLRunInvalidArgumentError(
+            f"Field '{field_name}' should be of type {expected_type.__name__} "
+            f"(got: {type(field_value).__name__} with value: {field_value})."
+        )
+
+
+# Verifying that a field input is of type list and all elements inside are of the expected element type.
+# If not the method raises a detailed MLRunInvalidArgumentError
+def verify_field_list_of_type(
+    field_name: str, field_value, expected_element_type: type
+):
+    verify_field_of_type(field_name, field_value, list)
+    for element in field_value:
+        verify_field_of_type(field_name, element, expected_element_type)
 
 
 def now_date():
@@ -188,6 +216,20 @@ def get_in(obj, keys, default=None):
     return obj
 
 
+def verify_and_update_in(
+    obj, key, value, expected_type: type, append=False, replace=True
+):
+    verify_field_of_type(key, value, expected_type)
+    update_in(obj, key, value, append, replace)
+
+
+def verify_list_and_update_in(
+    obj, key, value, expected_element_type: type, append=False, replace=True
+):
+    verify_field_list_of_type(key, value, expected_element_type)
+    update_in(obj, key, value, append, replace)
+
+
 def update_in(obj, key, value, append=False, replace=True):
     parts = key.split(".") if isinstance(key, str) else key
     for part in parts[:-1]:
@@ -240,7 +282,6 @@ def match_labels(labels, conditions):
 def match_times(time_from, time_to, obj, key):
     obj_time = get_in(obj, key)
     if not obj_time:
-
         # if obj doesn't have the required time, return false if either time_from or time_to were given
         return not time_from and not time_to
     obj_time = parser.isoparse(obj_time)
@@ -271,7 +312,6 @@ def flatten(df, col, prefix=""):
             for k in r.keys():
                 if k not in params:
                     params += [k]
-    params
     for p in params:
         df[prefix + p] = df[col].apply(lambda x: x.get(p, "") if x else "")
     df.drop(col, axis=1, inplace=True)
@@ -322,6 +362,10 @@ def date_representer(dumper, data):
     return dumper.represent_scalar("tag:yaml.org,2002:timestamp", value)
 
 
+def enum_representer(dumper, data):
+    return dumper.represent_str(str(data.value))
+
+
 yaml.add_representer(np.int64, int_representer, Dumper=yaml.SafeDumper)
 yaml.add_representer(np.integer, int_representer, Dumper=yaml.SafeDumper)
 yaml.add_representer(np.float64, float_representer, Dumper=yaml.SafeDumper)
@@ -329,6 +373,7 @@ yaml.add_representer(np.floating, float_representer, Dumper=yaml.SafeDumper)
 yaml.add_representer(np.ndarray, numpy_representer_seq, Dumper=yaml.SafeDumper)
 yaml.add_representer(np.datetime64, date_representer, Dumper=yaml.SafeDumper)
 yaml.add_representer(Timestamp, date_representer, Dumper=yaml.SafeDumper)
+yaml.add_multi_representer(enum.Enum, enum_representer, Dumper=yaml.SafeDumper)
 
 
 def dict_to_yaml(struct):
@@ -524,6 +569,9 @@ def enrich_image_url(image_url: str) -> str:
     # it's an mlrun image if the repository is mlrun
     is_mlrun_image = image_url.startswith("mlrun/") or "/mlrun/" in image_url
 
+    if is_mlrun_image and tag and ":" not in image_url:
+        image_url = f"{image_url}:{tag}"
+
     enrich_registry = False
     # enrich registry only if images_to_enrich_registry provided
     # example: "^mlrun/*" means enrich only if the image repository is mlrun and registry is not specified (in which
@@ -533,11 +581,9 @@ def enrich_image_url(image_url: str) -> str:
         for pattern_to_enrich in config.images_to_enrich_registry.split(","):
             if re.match(pattern_to_enrich, image_url):
                 enrich_registry = True
-    if enrich_registry:
+    if registry and enrich_registry:
+        registry = registry if registry.endswith("/") else f"{registry}/"
         image_url = f"{registry}{image_url}"
-
-    if is_mlrun_image and tag and ":" not in image_url:
-        image_url = f"{image_url}:{tag}"
 
     return image_url
 
@@ -563,14 +609,38 @@ def get_parsed_docker_registry() -> Tuple[Optional[str], Optional[str]]:
         )
 
 
-def pr_comment(repo: str, issue: int, message: str, token=None):
-    token = token or environ.get("GITHUB_TOKEN")
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "Authorization": f"token {token}",
-    }
-    url = f"https://api.github.com/repos/{repo}/issues/{issue}/comments"
+def pr_comment(
+    message: str,
+    repo: str = None,
+    issue: int = None,
+    token=None,
+    server=None,
+    gitlab=False,
+):
+    if ("CI_PROJECT_ID" in environ) or (server and "gitlab" in server):
+        gitlab = True
+    token = token or environ.get("GITHUB_TOKEN") or environ.get("GIT_TOKEN")
 
+    if gitlab:
+        server = server or "gitlab.com"
+        headers = {"PRIVATE-TOKEN": token}
+        repo = repo or environ.get("CI_PROJECT_ID")
+        issue = issue or environ.get("CI_MERGE_REQUEST_IID")
+        repo = repo.replace("/", "%2F")
+        url = f"https://{server}/api/v4/projects/{repo}/merge_requests/{issue}/notes"
+    else:
+        server = server or "api.github.com"
+        repo = repo or environ.get("GITHUB_REPOSITORY")
+        if not issue and "GITHUB_EVENT_PATH" in environ:
+            with open(environ["GITHUB_EVENT_PATH"]) as fp:
+                data = fp.read()
+                event = json.loads(data)
+                issue = event["pull_request"].get("number")
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": f"token {token}",
+        }
+        url = f"https://{server}/repos/{repo}/issues/{issue}/comments"
     resp = requests.post(url=url, json={"body": str(message)}, headers=headers)
     if not resp.ok:
         errmsg = f"bad pr comment resp!!\n{resp.text}"
@@ -587,6 +657,7 @@ def fill_object_hash(object_dict, uid_property_name, tag=""):
     object_dict["metadata"][uid_property_name] = ""
     object_dict["status"] = None
     object_dict["metadata"]["updated"] = None
+    object_created_timestamp = object_dict["metadata"].pop("created", None)
     data = json.dumps(object_dict, sort_keys=True).encode()
     h = hashlib.sha1()
     h.update(data)
@@ -594,11 +665,19 @@ def fill_object_hash(object_dict, uid_property_name, tag=""):
     object_dict["metadata"]["tag"] = tag
     object_dict["metadata"][uid_property_name] = uid
     object_dict["status"] = status
+    if object_created_timestamp:
+        object_dict["metadata"]["created"] = object_created_timestamp
     return uid
 
 
 def fill_function_hash(function_dict, tag=""):
     return fill_object_hash(function_dict, "hash", tag)
+
+
+class FatalFailureException(Exception):
+    def __init__(self, original_exception: Exception, *args: object) -> None:
+        super().__init__(*args)
+        self.original_exception = original_exception
 
 
 def retry_until_successful(
@@ -625,6 +704,9 @@ def retry_until_successful(
             result = _function(*args, **kwargs)
             return result
 
+        except FatalFailureException as exc:
+            logger.debug("Fatal failure exception raised. Not retrying")
+            raise exc.original_exception
         except Exception as exc:
             last_exception = exc
 
@@ -652,28 +734,89 @@ def retry_until_successful(
     )
 
 
+def get_ui_url(project, uid=None):
+    url = ""
+    if mlrun.mlconf.resolve_ui_url():
+        url = "{}/{}/{}/jobs".format(
+            mlrun.mlconf.resolve_ui_url(), mlrun.mlconf.ui.projects_prefix, project
+        )
+        if uid:
+            url += f"/monitor/{uid}/overview"
+    return url
+
+
 class RunNotifications:
-    def __init__(self, with_ipython=True, with_slack=False):
+    def __init__(self, with_ipython=True, with_slack=False, secrets=None):
         self._hooks = []
         self._html = ""
+        self._with_print = False
+        self._secrets = secrets or {}
         self.with_ipython = with_ipython
         if with_slack and "SLACK_WEBHOOK" in environ:
             self.slack()
+        self.print(skip_ipython=True)
 
-    def push(self, message, runs):
+    def push_start_message(self, project, commit_id=None, id=None):
+        message = f"Pipeline started in project {project}"
+        if id:
+            message += f" id={id}"
+        commit_id = (
+            commit_id or environ.get("GITHUB_SHA") or environ.get("CI_COMMIT_SHA")
+        )
+        if commit_id:
+            message += f", commit={commit_id}"
+        url = get_ui_url(project)
+        html = ""
+        if url:
+            html = (
+                message
+                + f'<div><a href="{url}" target="_blank">click here to check progress</a></div>'
+            )
+            message = message + f", check progress in {url}"
+        self.push(message, html=html)
+
+    def push_run_results(self, runs, push_all=False):
+        """push a structured table with run results to notification targets
+
+        :param runs:  list if run objects (RunObject)
+        :param push_all: push all notifications (including already notified runs)
+        """
+        had_errors = 0
+        runs_list = []
+        for r in runs:
+            notified = getattr(r, "_notified", False)
+            if not notified or push_all:
+                if r.status.state == "error":
+                    had_errors += 1
+                runs_list.append(r.to_dict())
+                r._notified = True
+
+        text = "pipeline run finished"
+        if had_errors:
+            text += f" with {had_errors} errors"
+        self.push(text, runs_list)
+
+    def push(self, message, runs=None, html=None):
+        if isinstance(runs, list):
+            runs = mlrun.lists.RunList(runs)
+        self._html = None
         for h in self._hooks:
             try:
-                h(message, runs)
+                h(message, runs, html)
             except Exception as exc:
                 logger.warning(f"failed to push notification, {exc}")
         if self.with_ipython and is_ipython:
             import IPython
 
-            IPython.display.display(IPython.display.HTML(self._get_html(message, runs)))
+            IPython.display.display(
+                IPython.display.HTML(self._get_html(html or message, runs))
+            )
 
     def _get_html(self, message, runs):
         if self._html:
             return self._html
+        if not runs:
+            return message
 
         html = "<h2>Run Results</h2>" + message
         html += "<br>click the hyper links below to see detailed results<br>"
@@ -681,8 +824,12 @@ class RunNotifications:
         self._html = html
         return html
 
-    def print(self):
-        def _print(message, runs):
+    def print(self, skip_ipython=None):
+        def _print(message, runs, html=None):
+            if not runs:
+                print(message)
+                return
+
             table = []
             for r in runs:
                 state = r["status"].get("state", "")
@@ -705,28 +852,32 @@ class RunNotifications:
                 + tabulate(table, headers=["status", "name", "uid", "results"])
             )
 
-        self._hooks.append(_print)
+        if not self._with_print and not (
+            skip_ipython and self.with_ipython and is_ipython
+        ):
+            self._hooks.append(_print)
+            self._with_print = True
         return self
 
     def slack(self, webhook=""):
         emoji = {"completed": ":smiley:", "running": ":man-running:", "error": ":x:"}
-        webhook = webhook or environ.get("SLACK_WEBHOOK")
+        webhook = (
+            webhook
+            or environ.get("SLACK_WEBHOOK")
+            or self._secrets.get("SLACK_WEBHOOK")
+        )
         if not webhook:
             raise ValueError("Slack webhook is not set")
 
         def row(text):
             return {"type": "mrkdwn", "text": text}
 
-        def _slack(message, runs):
+        def _slack(message, runs, html=None):
             fields = [row("*Runs*"), row("*Results*")]
-            for r in runs:
+            for r in runs or []:
                 meta = r["metadata"]
-                if config.resolve_ui_url():
-                    url = (
-                        f"{config.resolve_ui_url()}/{config.ui.projects_prefix}/"
-                        f"{meta.get('project')}/jobs/{meta.get('uid')}/info"
-                    )
-
+                url = get_ui_url(meta.get("project"), meta.get("uid"))
+                if url:
                     line = f'<{url}|*{meta.get("name")}*>'
                 else:
                     line = meta.get("name")
@@ -747,8 +898,11 @@ class RunNotifications:
                 ]
             }
 
-            for i in range(0, len(fields), 8):
-                data["blocks"].append({"type": "section", "fields": fields[i : i + 8]})
+            if runs:
+                for i in range(0, len(fields), 8):
+                    data["blocks"].append(
+                        {"type": "section", "fields": fields[i : i + 8]}
+                    )
             response = requests.post(
                 webhook,
                 data=json.dumps(data),
@@ -759,13 +913,19 @@ class RunNotifications:
         self._hooks.append(_slack)
         return self
 
-    def git_comment(self, git_repo=None, git_issue=None, token=None):
-        def _comment(message, runs):
+    def git_comment(
+        self, git_repo=None, git_issue=None, token=None, server=None, gitlab=False
+    ):
+        def _comment(message, runs, html=None):
             pr_comment(
-                git_repo or self._get_param("git_repo"),
-                git_issue or self._get_param("git_issue"),
-                self._get_html(message, runs),
-                token=token,
+                self._get_html(html or message, runs),
+                git_repo,
+                git_issue,
+                token=token
+                or self._secrets.get("GIT_TOKEN")
+                or self._secrets.get("GITHUB_TOKEN"),
+                server=server,
+                gitlab=gitlab,
             )
 
         self._hooks.append(_comment)

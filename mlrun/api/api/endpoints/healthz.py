@@ -1,27 +1,16 @@
 from fastapi import APIRouter
 
-from mlrun.config import config
-from mlrun.runtimes.utils import resolve_mpijob_crd_version
+import mlrun.api.crud
+import mlrun.api.schemas
 
 router = APIRouter()
 
 
-@router.get("/healthz")
+@router.get(
+    "/healthz", response_model=mlrun.api.schemas.ClientSpec,
+)
 def health():
-    mpijob_crd_version = resolve_mpijob_crd_version(api_context=True)
-    return {
-        "version": config.version,
-        "namespace": config.namespace,
-        "docker_registry": config.httpdb.builder.docker_registry,
-        "remote_host": config.remote_host,
-        "mpijob_crd_version": mpijob_crd_version,
-        "ui_url": config.resolve_ui_url(),
-        "ui_projects_prefix": config.ui.projects_prefix,
-        "artifact_path": config.artifact_path,
-        "spark_app_image": config.spark_app_image,
-        "spark_app_image_tag": config.spark_app_image_tag,
-        "kfp_image": config.kfp_image,
-        "dask_kfp_image": config.dask_kfp_image,
-        "api_url": config.httpdb.api_url,
-        "scrape_metrics": config.scrape_metrics,
-    }
+
+    # TODO: From 0.7.0 client uses the /client-spec endpoint,
+    #  when this is the oldest relevant client, remove this logic from the healthz endpoint
+    return mlrun.api.crud.ClientSpec().get_client_spec()

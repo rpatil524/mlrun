@@ -14,16 +14,18 @@
 
 import inspect
 import re
+import time
 import warnings
 from collections import OrderedDict
 from copy import deepcopy
+from datetime import datetime
 from os import environ
-from typing import Dict, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import mlrun
 
 from .config import config
-from .utils import dict_to_json, dict_to_yaml, get_artifact_target, get_in
+from .utils import dict_to_json, dict_to_yaml, get_artifact_target
 
 
 class ModelObj:
@@ -65,17 +67,23 @@ class ModelObj:
         return struct
 
     @classmethod
-    def from_dict(cls, struct=None, fields=None):
+    def from_dict(cls, struct=None, fields=None, deprecated_fields: dict = None):
         """create an object from a python dictionary"""
         struct = {} if struct is None else struct
+        deprecated_fields = deprecated_fields or {}
         fields = fields or cls._dict_fields
         if not fields:
             fields = list(inspect.signature(cls.__init__).parameters.keys())
         new_obj = cls()
         if struct:
             for key, val in struct.items():
-                if key in fields:
+                if key in fields and key not in deprecated_fields:
                     setattr(new_obj, key, val)
+            for deprecated_field, new_field in deprecated_fields.items():
+                field_value = struct.get(new_field) or struct.get(deprecated_field)
+                if field_value:
+                    setattr(new_obj, new_field, field_value)
+
         return new_obj
 
     def to_yaml(self):
@@ -285,17 +293,22 @@ class ImageBuilder(ModelObj):
         secret=None,
         code_origin=None,
         registry=None,
+        load_source_on_run=None,
+        origin_filename=None,
     ):
         self.functionSourceCode = functionSourceCode  #: functionSourceCode
         self.codeEntryType = ""  #: codeEntryType
-        self.source = source  #: course
+        self.codeEntryAttributes = ""  #: codeEntryAttributes
+        self.source = source  #: source
         self.code_origin = code_origin  #: code_origin
+        self.origin_filename = origin_filename
         self.image = image  #: image
         self.base_image = base_image  #: base_image
         self.commands = commands or []  #: commands
         self.extra = extra  #: extra
         self.secret = secret  #: secret
         self.registry = registry  #: registry
+        self.load_source_on_run = load_source_on_run  #: load_source_on_run
         self.build_pod = None
 
 
@@ -513,6 +526,7 @@ class RunStatus(ModelObj):
         start_time=None,
         last_update=None,
         iterations=None,
+        ui_url=None,
     ):
         self.state = state or "created"
         self.status_text = status_text
@@ -524,6 +538,7 @@ class RunStatus(ModelObj):
         self.start_time = start_time
         self.last_update = last_update
         self.iterations = iterations
+        self.ui_url = ui_url
 
 
 class RunTemplate(ModelObj):
@@ -627,6 +642,10 @@ class RunTemplate(ModelObj):
 
             task.with_secrets('vault', ['secret1', 'secret2'...])
 
+            # If using with k8s secrets, the k8s secret is managed by MLRun, through the project-secrets
+            # mechanism. The secrets will be attached to the running pod as environment variables.
+            task.with_secrets('kubernetes', ['secret1', 'secret2'])
+
             # If using an empty secrets list [] then all accessible secrets will be available.
             task.with_secrets('vault', [])
 
@@ -676,6 +695,7 @@ class RunObject(RunTemplate):
         super().__init__(spec, metadata)
         self._status = None
         self.status = status
+        self.outputs_wait_for_completion = True
 
     @classmethod
     def from_template(cls, template: RunTemplate):
@@ -691,17 +711,29 @@ class RunObject(RunTemplate):
 
     def output(self, key):
         """return the value of a specific result or artifact by key"""
+        if self.outputs_wait_for_completion:
+            self.wait_for_completion()
         if self.status.results and key in self.status.results:
             return self.status.results.get(key)
-        artifact = self.artifact(key)
+        artifact = self._artifact(key)
         if artifact:
             return get_artifact_target(artifact, self.metadata.project)
         return None
 
     @property
+    def ui_url(self) -> str:
+        """UI URL (for relevant runtimes)"""
+        self.refresh()
+        if not self._status.ui_url:
+            print("UI currently not available (status={})".format(self._status.state))
+        return self._status.ui_url
+
+    @property
     def outputs(self):
         """return a dict of outputs, result values and artifact uris"""
         outputs = {}
+        if self.outputs_wait_for_completion:
+            self.wait_for_completion()
         if self.status.results:
             outputs = {k: v for k, v in self.status.results.items()}
         if self.status.artifacts:
@@ -709,8 +741,19 @@ class RunObject(RunTemplate):
                 outputs[a["key"]] = get_artifact_target(a, self.metadata.project)
         return outputs
 
-    def artifact(self, key):
-        """return artifact metadata by key"""
+    def artifact(self, key) -> "mlrun.DataItem":
+        """return artifact DataItem by key"""
+        if self.outputs_wait_for_completion:
+            self.wait_for_completion()
+        artifact = self._artifact(key)
+        if artifact:
+            uri = get_artifact_target(artifact, self.metadata.project)
+            if uri:
+                return mlrun.get_dataitem(uri)
+        return None
+
+    def _artifact(self, key):
+        """return artifact DataItem by key"""
         if self.status.artifacts:
             for a in self.status.artifacts:
                 if a["key"] == key:
@@ -723,6 +766,13 @@ class RunObject(RunTemplate):
 
     def state(self):
         """current run state"""
+        if self.status.state in mlrun.runtimes.constants.RunStates.terminal_states():
+            return self.status.state
+        self.refresh()
+        return self.status.state or "unknown"
+
+    def refresh(self):
+        """refresh run state from the db"""
         db = mlrun.get_run_db()
         run = db.read_run(
             uid=self.metadata.uid,
@@ -730,7 +780,9 @@ class RunObject(RunTemplate):
             iter=self.metadata.iteration,
         )
         if run:
-            return get_in(run, "status.state", "unknown")
+            self.status = RunStatus.from_dict(run.get("status", {}))
+            self.status.from_dict(run.get("status", {}))
+            return self
 
     def show(self):
         """show the current status widget, in jupyter notebook"""
@@ -754,6 +806,26 @@ class RunObject(RunTemplate):
 
         if state:
             print(f"final state: {state}")
+        return state
+
+    def wait_for_completion(self, sleep=3, timeout=0, raise_on_failure=True):
+        """wait for async run to complete"""
+        total_time = 0
+        while True:
+            state = self.state()
+            if state in mlrun.runtimes.constants.RunStates.terminal_states():
+                break
+            time.sleep(sleep)
+            total_time += sleep
+            if timeout and total_time > timeout:
+                raise mlrun.errors.MLRunTimeoutError(
+                    "Run did not reach terminal state on time"
+                )
+        if raise_on_failure and state != mlrun.runtimes.constants.RunStates.completed:
+            self.logs(watch=False)
+            raise mlrun.errors.MLRunRuntimeError(
+                f"task {self.metadata.name} did not complete (state={state})"
+            )
         return state
 
     @staticmethod
@@ -783,11 +855,21 @@ class RunObject(RunTemplate):
 
 
 class EntrypointParam(ModelObj):
-    def __init__(self, name="", type=None, default=None, doc=""):
+    def __init__(
+        self,
+        name="",
+        type=None,
+        default=None,
+        doc="",
+        required=None,
+        choices: list = None,
+    ):
         self.name = name
         self.type = type
         self.default = default
         self.doc = doc
+        self.required = required
+        self.choices = choices
 
 
 class FunctionEntrypoint(ModelObj):
@@ -864,7 +946,7 @@ def new_task(
 
     :param name:            task name
     :param project:         task project
-    :param handler:         code entry-point/hanfler name
+    :param handler:         code entry-point/handler name
     :param params:          input parameters (dict)
     :param hyper_params:    dictionary of hyper parameters and list values, each
                             hyper param holds a list of values, the run will be
@@ -924,6 +1006,8 @@ class DataSource(ModelObj):
         "online",
         "workers",
         "max_age",
+        "start_time",
+        "end_time",
     ]
     kind = None
 
@@ -935,13 +1019,18 @@ class DataSource(ModelObj):
         key_field: str = None,
         time_field: str = None,
         schedule: str = None,
+        start_time: Optional[Union[datetime, str]] = None,
+        end_time: Optional[Union[datetime, str]] = None,
     ):
+
         self.name = name
-        self.path = str(path)
+        self.path = str(path) if path is not None else None
         self.attributes = attributes
         self.schedule = schedule
         self.key_field = key_field
         self.time_field = time_field
+        self.start_time = start_time
+        self.end_time = end_time
 
         self.online = None
         self.max_age = None
@@ -955,7 +1044,26 @@ class DataSource(ModelObj):
 class DataTargetBase(ModelObj):
     """data target spec, specify a destination for the feature set data"""
 
-    _dict_fields = ["name", "kind", "path", "after_state", "attributes"]
+    _dict_fields = [
+        "name",
+        "kind",
+        "path",
+        "after_step",
+        "attributes",
+        "partitioned",
+        "key_bucketing_number",
+        "partition_cols",
+        "time_partitioning_granularity",
+        "max_events",
+        "flush_after_seconds",
+    ]
+
+    # TODO - remove once "after_state" is fully deprecated
+    @classmethod
+    def from_dict(cls, struct=None, fields=None):
+        return super().from_dict(
+            struct, fields=fields, deprecated_fields={"after_state": "after_step"}
+        )
 
     def __init__(
         self,
@@ -963,13 +1071,35 @@ class DataTargetBase(ModelObj):
         name: str = "",
         path=None,
         attributes: Dict[str, str] = None,
+        after_step=None,
+        partitioned: bool = False,
+        key_bucketing_number: Optional[int] = None,
+        partition_cols: Optional[List[str]] = None,
+        time_partitioning_granularity: Optional[str] = None,
+        max_events: Optional[int] = None,
+        flush_after_seconds: Optional[int] = None,
         after_state=None,
     ):
+        if after_state:
+            warnings.warn(
+                "The after_state parameter is deprecated. Use after_step instead",
+                # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
+                PendingDeprecationWarning,
+            )
+            after_step = after_step or after_state
+
         self.name = name
         self.kind: str = kind
         self.path = path
-        self.after_state = after_state
+        self.after_step = after_step
         self.attributes = attributes or {}
+        self.last_written = None
+        self.partitioned = partitioned
+        self.key_bucketing_number = key_bucketing_number
+        self.partition_cols = partition_cols
+        self.time_partitioning_granularity = time_partitioning_granularity
+        self.max_events = max_events
+        self.flush_after_seconds = flush_after_seconds
 
 
 class FeatureSetProducer(ModelObj):
@@ -993,9 +1123,9 @@ class DataTarget(DataTargetBase):
         "start_time",
         "online",
         "status",
-        "is_dir",
         "updated",
         "size",
+        "last_written",
     ]
 
     def __init__(
@@ -1008,7 +1138,7 @@ class DataTarget(DataTargetBase):
         self.online = online
         self.max_age = None
         self.start_time = None
-        self.is_dir = None
+        self.last_written = None
         self._producer = None
         self.producer = {}
 

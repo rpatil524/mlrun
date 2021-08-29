@@ -13,6 +13,23 @@
 # limitations under the License.
 
 # Don't remove this, used by sphinx documentation
-__all__ = ["load_project", "new_project", "MlrunProject"]
+__all__ = [
+    "load_project",
+    "new_project",
+    "get_or_create_project",
+    "MlrunProject",
+    "ProjectMetadata",
+    "ProjectSpec",
+    "ProjectStatus",
+]
 
-from .project import MlrunProject, load_project, new_project
+from .pipelines import pipeline_context  # noqa
+from .project import (
+    MlrunProject,
+    ProjectMetadata,
+    ProjectSpec,
+    ProjectStatus,
+    get_or_create_project,
+    load_project,
+    new_project,
+)

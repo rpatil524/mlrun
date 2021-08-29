@@ -31,7 +31,6 @@ import mlrun.projects.project
 from mlrun import RunObject
 from mlrun.api import schemas
 from mlrun.artifacts import Artifact
-from mlrun.db import RunDBError
 from mlrun.db.httpdb import HTTPRunDB
 from tests.conftest import tests_root_directory, wait_for_server
 
@@ -92,6 +91,8 @@ def docker_fixture():
             "build",
             "-f",
             "dockerfiles/mlrun-api/Dockerfile",
+            "--build-arg",
+            "MLRUN_PYTHON_VERSION=3.7.9",
             "--tag",
             docker_tag,
             ".",
@@ -119,7 +120,9 @@ def docker_fixture():
 
         # retrieve container bind port + host
         out = run(["docker", "port", container_id, "8080"], stdout=PIPE, check=True)
-        host = out.stdout.decode("utf-8").strip()
+        # usually the output is something like b'0.0.0.0:49154\n' but sometimes (in GH actions) it's something like
+        # b'0.0.0.0:49154\n:::49154\n' for some reason, so just taking the first line
+        host = out.stdout.decode("utf-8").splitlines()[0]
 
         url = f"http://{host}"
         print(f"api url: {url}")
@@ -252,14 +255,20 @@ def test_artifacts(create_server):
     server: Server = create_server()
     db = server.conn
     prj, uid, key, body = "p9", "u19", "k802", "tomato"
-    artifact = Artifact(key, body)
+    artifact = Artifact(key, body, target_path="a.txt")
 
     db.store_artifact(key, artifact, uid, project=prj)
     db.store_artifact(key, artifact, uid, project=prj, iter=42)
     artifacts = db.list_artifacts(project=prj, tag="*")
     assert len(artifacts) == 2, "bad number of artifacts"
+    assert artifacts.objects()[0].key == key, "not a valid artifact object"
+    assert artifacts.dataitems()[0].url, "not a valid artifact dataitem"
 
     artifacts = db.list_artifacts(project=prj, tag="*", iter=0)
+    assert len(artifacts) == 1, "bad number of artifacts"
+
+    # Only 1 will be returned since it's only looking for iter 0
+    artifacts = db.list_artifacts(project=prj, tag="*", best_iteration=True)
     assert len(artifacts) == 1, "bad number of artifacts"
 
     db.del_artifacts(project=prj, tag="*")
@@ -268,31 +277,35 @@ def test_artifacts(create_server):
 
 
 def test_basic_auth(create_server):
-    user, passwd = "bugs", "bunny"
+    user, password = "bugs", "bunny"
     env = {
-        "MLRUN_httpdb__user": user,
-        "MLRUN_httpdb__password": passwd,
+        "MLRUN_HTTPDB__AUTHENTICATION__MODE": "basic",
+        "MLRUN_HTTPDB__AUTHENTICATION__BASIC__USERNAME": user,
+        "MLRUN_HTTPDB__AUTHENTICATION__BASIC__PASSWORD": password,
     }
     server: Server = create_server(env)
 
     db: HTTPRunDB = server.conn
 
-    with pytest.raises(RunDBError):
+    with pytest.raises(mlrun.errors.MLRunUnauthorizedError):
         db.list_runs()
 
     db.user = user
-    db.password = passwd
+    db.password = password
     db.list_runs()
 
 
 def test_bearer_auth(create_server):
     token = "banana"
-    env = {"MLRUN_httpdb__token": token}
+    env = {
+        "MLRUN_HTTPDB__AUTHENTICATION__MODE": "bearer",
+        "MLRUN_HTTPDB__AUTHENTICATION__BEARER__TOKEN": token,
+    }
     server: Server = create_server(env)
 
     db: HTTPRunDB = server.conn
 
-    with pytest.raises(RunDBError):
+    with pytest.raises(mlrun.errors.MLRunUnauthorizedError):
         db.list_runs()
 
     db.token = token
@@ -476,7 +489,11 @@ def _create_feature_vector(name):
             "tag": "latest",
         },
         "spec": {
-            "features": ["feature_set:*", "feature_set:something", "just_a_feature"],
+            "features": [
+                "feature_set.*",
+                "feature_set.something",
+                "feature_set.just_a_feature",
+            ],
             "description": "just a bunch of features",
         },
         "status": {"state": "created"},
@@ -497,7 +514,7 @@ def test_feature_vectors(create_server):
     # Test store_feature_set, which allows updates as well as inserts
     db.store_feature_vector(feature_vector, project=project)
 
-    feature_vector_update = {"spec": {"features": ["bla", "blu"]}}
+    feature_vector_update = {"spec": {"features": ["bla.asd", "blu.asd"]}}
 
     # additive mode means add the feature to the features-list
     db.patch_feature_vector(

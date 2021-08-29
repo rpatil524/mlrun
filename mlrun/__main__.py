@@ -13,8 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import json
+import pathlib
+import socket
 import traceback
 from ast import literal_eval
 from base64 import b64decode, b64encode
@@ -27,23 +28,24 @@ import click
 import yaml
 from tabulate import tabulate
 
+import mlrun
+
 from .builder import upload_tarball
 from .config import config as mlconf
 from .db import get_run_db
 from .k8s_utils import K8sHelper
 from .model import RunTemplate
+from .platforms import auto_mount as auto_mount_modifier
 from .projects import load_project
 from .run import get_object, import_function, import_function_to_dict, new_function
 from .runtimes import RemoteRuntime, RunError, RuntimeKinds, ServingRuntime
 from .secrets import SecretsStore
 from .utils import (
-    RunNotifications,
     dict_to_yaml,
     get_in,
     list2dict,
     logger,
     parse_versioned_object_uri,
-    pr_comment,
     run_keys,
     update_in,
 )
@@ -115,12 +117,19 @@ def main():
 @click.option(
     "--handler", default="", help="invoke function handler inside the code file"
 )
-@click.option("--mode", help="special run mode noctx | pass")
+@click.option("--mode", help="special run mode ('pass' for using the command as is)")
 @click.option("--schedule", help="cron schedule")
 @click.option("--from-env", is_flag=True, help="read the spec from the env var")
 @click.option("--dump", is_flag=True, help="dump run results as YAML")
 @click.option("--image", default="", help="container image")
+@click.option("--kind", default="", help="serverless runtime kind")
+@click.option("--source", default="", help="source code archive/git")
+@click.option("--local", is_flag=True, help="run the task locally (ignore runtime)")
+@click.option(
+    "--auto-mount", is_flag=True, help="add volume mount to job using auto mount option"
+)
 @click.option("--workdir", default="", help="run working directory")
+@click.option("--origin-file", default="", help="for internal use")
 @click.option("--label", multiple=True, help="run labels (key=val)")
 @click.option("--watch", "-w", is_flag=True, help="watch/tail run log")
 @click.option("--verbose", is_flag=True, help="verbose log")
@@ -158,7 +167,12 @@ def run(
     from_env,
     dump,
     image,
+    kind,
+    source,
+    local,
+    auto_mount,
     workdir,
+    origin_file,
     label,
     watch,
     verbose,
@@ -190,24 +204,41 @@ def run(
 
     if workflow:
         runobj.metadata.labels["workflow"] = workflow
+        runobj.metadata.labels["mlrun/runner-pod"] = socket.gethostname()
 
     if db:
         mlconf.dbpath = db
 
-    if func_url:
-        runtime = func_url_to_runtime(func_url)
-        if runtime is None:
-            exit(1)
-        kind = get_in(runtime, "kind", "")
+    # remove potential quotes from command
+    eval_url = py_eval(url)
+    url = eval_url if isinstance(eval_url, str) else url
+    url_file = url
+    url_args = ""
+    if url:
+        split = url.split(maxsplit=1)
+        url_file = split[0]
+        if len(split) > 1:
+            url_args = split[1]
+
+    if func_url or kind or image:
+        if func_url:
+            runtime = func_url_to_runtime(func_url)
+            kind = get_in(runtime, "kind", kind or "job")
+            if runtime is None:
+                exit(1)
+        else:
+            kind = kind or "job"
+            runtime = {"kind": kind, "spec": {"image": image}}
+
         if kind not in ["", "local", "dask"] and url:
-            if path.isfile(url) and url.endswith(".py"):
-                with open(url) as fp:
+            if url_file and path.isfile(url_file):
+                with open(url_file) as fp:
                     body = fp.read()
                 based = b64encode(body.encode("utf-8")).decode("utf-8")
-                logger.info(f"packing code at {url}")
+                logger.info(f"packing code at {url_file}")
                 update_in(runtime, "spec.build.functionSourceCode", based)
-                url = ""
-                update_in(runtime, "spec.command", "")
+                url = f"main{pathlib.Path(url_file).suffix} {url_args}"
+                update_in(runtime, "spec.build.code_origin", url_file)
     elif runtime:
         runtime = py_eval(runtime)
         if not isinstance(runtime, dict):
@@ -221,14 +252,44 @@ def run(
         code = get_in(runtime, "spec.build.functionSourceCode", code)
     if from_env and code:
         code = b64decode(code).decode("utf-8")
+        origin_file = pathlib.Path(
+            get_in(runtime, "spec.build.origin_filename", origin_file)
+        )
         if kfp:
             print(f"code:\n{code}\n")
-        with open("main.py", "w") as fp:
+        suffix = pathlib.Path(url_file).suffix if url else ".py"
+        if suffix != ".py" and mode != "pass" and url_file != "{codefile}":
+            print(
+                f"command/url ({url}) must specify a .py file when not in 'pass' mode"
+            )
+            exit(1)
+        if mode == "pass":
+            if "{codefile}" in url:
+                url_file = origin_file.name or "codefile"
+                url = url.replace("{codefile}", url_file)
+            elif suffix == ".sh" or origin_file.suffix == ".sh":
+                url_file = origin_file.name or "codefile.sh"
+                url = f"bash {url_file} {url_args}".strip()
+            else:
+                print(
+                    "error, command must be specified with '{codefile}' in it "
+                    "(to determine the position of the code file)"
+                )
+                exit(1)
+        else:
+            url_file = "main.py"
+            if origin_file.name:
+                url_file = origin_file.stem + ".py"
+            url = f"{url_file} {url_args}".strip()
+        with open(url_file, "w") as fp:
             fp.write(code)
-        url = url or "main.py"
 
     if url:
+        if not name and not runtime:
+            name = path.splitext(path.basename(url))[0]
+            runobj.metadata.name = runobj.metadata.name or name
         update_in(runtime, "spec.command", url)
+
     if run_args:
         update_in(runtime, "spec.args", list(run_args))
     if image:
@@ -252,6 +313,8 @@ def run(
     )
     set_item(runobj.spec, verbose, "verbose")
     set_item(runobj.spec, scrape_metrics, "scrape_metrics")
+    update_in(runtime, "metadata.name", name, replace=False)
+    update_in(runtime, "metadata.project", project, replace=False)
 
     if kfp or runobj.spec.verbose or verbose:
         print(f"MLRun version: {str(Version().get())}")
@@ -261,12 +324,13 @@ def run(
         pprint(runobj.to_dict())
 
     try:
-        update_in(runtime, "metadata.name", name, replace=False)
-        fn = new_function(runtime=runtime, kfp=kfp, mode=mode)
+        fn = new_function(runtime=runtime, kfp=kfp, mode=mode, source=source)
         if workdir:
             fn.spec.workdir = workdir
+        if auto_mount:
+            fn.apply(auto_mount_modifier())
         fn.is_child = from_env and not kfp
-        resp = fn.run(runobj, watch=watch, schedule=schedule)
+        resp = fn.run(runobj, watch=watch, schedule=schedule, local=local)
         if resp and dump:
             print(resp.to_yaml())
     except RunError as err:
@@ -532,11 +596,11 @@ def get(kind, name, selector, namespace, uid, project, tag, db, extra_args):
         run_db = get_run_db(db or mlconf.dbpath)
         if name:
             # the runtime identifier is its kind
-            runtime = run_db.get_runtime(kind=name, label_selector=selector)
-            print(dict_to_yaml(runtime))
+            runtime = run_db.list_runtime_resources(kind=name, label_selector=selector)
+            print(dict_to_yaml(runtime.dict()))
             return
-        runtimes = run_db.list_runtimes(label_selector=selector)
-        print(dict_to_yaml(runtimes))
+        runtimes = run_db.list_runtime_resources(label_selector=selector)
+        print(dict_to_yaml(runtimes.dict()))
     elif kind.startswith("run"):
         run_db = get_run_db()
         if name:
@@ -647,7 +711,7 @@ def logs(uid, project, offset, db, watch):
     "-a",
     default="",
     multiple=True,
-    help="Kubeflow pipeline arguments name and value tuples, e.g. -a x=6",
+    help="Kubeflow pipeline arguments name and value tuples (with -r flag), e.g. -a x=6",
 )
 @click.option("--artifact-path", "-p", help="output artifacts path")
 @click.option(
@@ -664,13 +728,15 @@ def logs(uid, project, offset, db, watch):
 @click.option("--db", help="api and db service path/url")
 @click.option("--init-git", is_flag=True, help="for new projects init git context")
 @click.option(
-    "--clone", "-c", is_flag=True, help="force override/clone the context dir"
+    "--clone", "-c", is_flag=True, help="force override/clone into the context dir"
 )
 @click.option("--sync", is_flag=True, help="sync functions into db")
 @click.option(
     "--watch", "-w", is_flag=True, help="wait for pipeline completion (with -r flag)"
 )
-@click.option("--dirty", "-d", is_flag=True, help="allow git with uncommited changes")
+@click.option(
+    "--dirty", "-d", is_flag=True, help="allow run with uncommitted git changes"
+)
 @click.option("--git-repo", help="git repo (org/repo) for git comments")
 @click.option(
     "--git-issue", type=int, default=None, help="git issue number for git comments"
@@ -705,11 +771,18 @@ def project(
     if artifact_path and not ("://" in artifact_path or artifact_path.startswith("/")):
         artifact_path = path.abspath(artifact_path)
     if param:
-        proj.params = fill_params(param, proj.params)
+        proj.spec.params = fill_params(param, proj.spec.params)
     if git_repo:
-        proj.params["git_repo"] = git_repo
+        proj.spec.params["git_repo"] = git_repo
     if git_issue:
-        proj.params["git_issue"] = git_issue
+        proj.spec.params["git_issue"] = git_issue
+    commit = (
+        proj.get_param("commit_id")
+        or environ.get("GITHUB_SHA")
+        or environ.get("CI_COMMIT_SHA")
+    )
+    if commit:
+        proj.spec.params["commit_id"] = commit
     if secrets:
         secrets = line2keylist(secrets, "kind", "source")
         proj._secrets = SecretsStore.from_list(secrets)
@@ -728,6 +801,15 @@ def project(
         print(f"running workflow {run} file: {workflow_path}")
         message = run = ""
         had_error = False
+        gitops = (
+            git_issue
+            or environ.get("GITHUB_EVENT_PATH")
+            or environ.get("CI_MERGE_REQUEST_IID")
+        )
+        if gitops:
+            proj.notifiers.git_comment(
+                git_repo, git_issue, token=proj.get_secret("GITHUB_TOKEN")
+            )
         try:
             run = proj.run(
                 run,
@@ -743,36 +825,15 @@ def project(
             message = f"failed to run pipeline, {exc}"
             had_error = True
             print(message)
-        print(f"run id: {run}")
+        print(f"run id: {run.run_id}")
 
-        gitops = git_repo and git_issue
-        if gitops:
-            if not had_error:
-                message = f"Pipeline started id={run}"
-                if proj.params and "commit" in proj.params:
-                    message += f", commit={proj.params['commit']}"
-                if mlconf.resolve_ui_url():
-                    message_template = (
-                        '<div><a href="{}/{}/{}/jobs" target='
-                        + ' "_blank">click here to check progress</a></div>'
-                    )
-                    message += message_template.format(
-                        mlconf.resolve_ui_url(), mlconf.ui.projects_prefix, proj.name
-                    )
-            pr_comment(
-                git_repo, git_issue, message, token=proj.get_secret("GITHUB_TOKEN")
-            )
-
+        if had_error:
+            proj.notifiers.push(message)
         if had_error:
             exit(1)
 
         if watch:
-            n = RunNotifications(with_slack=True).print()
-            if gitops:
-                n.git_comment(
-                    git_repo, git_issue, token=proj.get_secret("GITHUB_TOKEN")
-                )
-            proj.get_run_status(run, notifiers=n)
+            proj.get_run_status(run)
 
     elif sync:
         print("saving project functions to db ..")
@@ -800,7 +861,9 @@ def validate_kind(ctx, param, value):
     "--grace-period",
     "-gp",
     type=int,
-    default=mlconf.runtime_resources_deletion_grace_period,
+    # When someone triggers the cleanup manually we assume they want runtime resources in terminal state to be removed
+    # now, therefore not using here mlconf.runtime_resources_deletion_grace_period
+    default=0,
     help="the grace period (in seconds) that will be given to runtime resources (after they're in terminal state) "
     "before cleaning them. Ignored when --force is given",
     show_default=True,
@@ -822,29 +885,47 @@ def clean(kind, object_id, api, label_selector, force, grace_period):
 
         \b
         # Clean resources for specific job (by uid)
-        mlrun clean dask 15d04c19c2194c0a8efb26ea3017254b
+        mlrun clean mpijob 15d04c19c2194c0a8efb26ea3017254b
     """
     mldb = get_run_db(api or mlconf.dbpath)
-    if kind:
-        if object_id:
-            mldb.delete_runtime_object(
-                kind=kind,
-                object_id=object_id,
-                label_selector=label_selector,
-                force=force,
-                grace_period=grace_period,
-            )
-        else:
-            mldb.delete_runtime(
-                kind=kind,
-                label_selector=label_selector,
-                force=force,
-                grace_period=grace_period,
-            )
-    else:
-        mldb.delete_runtimes(
-            label_selector=label_selector, force=force, grace_period=grace_period
-        )
+    mldb.delete_runtime_resources(
+        kind=kind,
+        object_id=object_id,
+        label_selector=label_selector,
+        force=force,
+        grace_period=grace_period,
+    )
+
+
+@main.command(name="watch-stream")
+@click.argument("url", type=str)
+@click.option(
+    "--shard-ids",
+    "-s",
+    multiple=True,
+    type=int,
+    help="shard id to listen on (can be multiple)",
+)
+@click.option("--seek", help="where to start/seek (EARLIEST or LATEST)")
+@click.option(
+    "--interval",
+    "-i",
+    default=3,
+    show_default=True,
+    help="interval in seconds",
+    type=int,
+)
+@click.option(
+    "--is-json",
+    "-j",
+    is_flag=True,
+    help="indicate the payload is json (will be deserialized)",
+)
+def watch_stream(url, shard_ids, seek, interval, is_json):
+    """watch on a stream and print data every interval"""
+    mlrun.platforms.watch_stream(
+        url, shard_ids, seek, interval=interval, is_json=is_json
+    )
 
 
 @main.command(name="config")

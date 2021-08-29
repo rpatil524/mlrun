@@ -11,6 +11,7 @@ class ObjectMetadata(BaseModel):
     tag: Optional[str]
     labels: Optional[dict]
     updated: Optional[datetime]
+    created: Optional[datetime]
     uid: Optional[str]
 
     class Config:
@@ -59,3 +60,6 @@ class ObjectKind(str, Enum):
     background_task = "BackgroundTask"
     feature_vector = "FeatureVector"
     model_endpoint = "model-endpoint"
+    marketplace_source = "MarketplaceSource"
+    marketplace_item = "MarketplaceItem"
+    marketplace_catalog = "MarketplaceCatalog"

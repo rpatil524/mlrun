@@ -14,6 +14,7 @@
 import hashlib
 import json
 import os
+import typing
 from copy import deepcopy
 from io import StringIO
 from sys import stderr
@@ -270,7 +271,7 @@ def generate_function_image_name(function):
     _, repository = helpers.get_parsed_docker_registry()
     if not repository:
         repository = "mlrun"
-    return f".{repository}/func-{project}-{function.metadata.name}-{tag}"
+    return f".{repository}/func-{project}-{function.metadata.name}:{tag}"
 
 
 def set_named_item(obj, item):
@@ -289,6 +290,19 @@ def get_item_name(item, attr="name"):
 
 def apply_kfp(modify, cop, runtime):
     modify(cop)
+
+    # Have to do it here to avoid circular dependencies
+    from .pod import AutoMountType
+
+    # Check if modifier is one of the known mount modifiers. We need to use startswith since the modifier itself is
+    # a nested function returned from the modifier function (such as 'v3io_cred.<locals>._use_v3io_cred')
+    modifier_name = modify.__qualname__
+    if any(
+        modifier_name.startswith(mount_modifier)
+        for mount_modifier in AutoMountType.all_mount_modifiers()
+    ):
+        runtime.spec.mount_applied = True
+
     api = client.ApiClient()
     for k, v in cop.pod_labels.items():
         runtime.metadata.labels[k] = v
@@ -366,6 +380,18 @@ def get_func_selector(project, name=None, tag=None):
     return s
 
 
+def parse_function_selector(selector: typing.List[str]) -> typing.Tuple[str, str, str]:
+    project, name, tag = None, None, None
+    for criteria in selector:
+        if f"{mlrun_key}project=" in criteria:
+            project = criteria[f"{mlrun_key}project=":]
+        if f"{mlrun_key}function=" in criteria:
+            name = criteria[f"{mlrun_key}function=":]
+        if f"{mlrun_key}tag=" in criteria:
+            tag = criteria[f"{mlrun_key}tag=":]
+    return project, name, tag
+
+
 class k8s_resource:
     kind = ""
     per_run = False
@@ -413,6 +439,10 @@ def enrich_function_from_dict(function, function_dict):
         "resources",
         "image_pull_policy",
         "replicas",
+        "node_name",
+        "node_selector",
+        "affinity",
+        "priority_class_name",
     ]:
         override_value = getattr(override_function.spec, attribute, None)
         if override_value:

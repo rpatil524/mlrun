@@ -48,7 +48,7 @@ class MLRunHTTPStatusError(MLRunHTTPError):
         )
 
 
-def raise_for_status(response: requests.Response):
+def raise_for_status(response: requests.Response, message: str = None):
     """
     Raise a specific MLRunSDK error depending on the given response status code.
     If no specific error exists, raises an MLRunHTTPError
@@ -56,12 +56,26 @@ def raise_for_status(response: requests.Response):
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
+        error_message = str(exc)
+        if message:
+            error_message = f"{str(exc)}: {message}"
         try:
             raise STATUS_ERRORS[response.status_code](
-                str(exc), response=response
+                error_message, response=response
             ) from exc
         except KeyError:
-            raise MLRunHTTPError(str(exc), response=response) from exc
+            raise MLRunHTTPError(error_message, response=response) from exc
+
+
+def raise_for_status_code(status_code: int, message: str = None):
+    """
+    Raise a specific MLRunSDK error depending on the given response status code.
+    If no specific error exists, raises an MLRunHTTPError
+    """
+    try:
+        raise STATUS_ERRORS[status_code](message)
+    except KeyError:
+        raise MLRunHTTPError(message)
 
 
 # Specific Errors
@@ -101,8 +115,16 @@ class MLRunInternalServerError(MLRunHTTPStatusError):
     error_status_code = HTTPStatus.INTERNAL_SERVER_ERROR.value
 
 
+class MLRunRuntimeError(MLRunHTTPStatusError, RuntimeError):
+    error_status_code = HTTPStatus.INTERNAL_SERVER_ERROR.value
+
+
 class MLRunMissingDependencyError(MLRunInternalServerError):
     pass
+
+
+class MLRunTimeoutError(MLRunHTTPStatusError, TimeoutError):
+    error_status_code = HTTPStatus.GATEWAY_TIMEOUT.value
 
 
 STATUS_ERRORS = {

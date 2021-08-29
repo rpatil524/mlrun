@@ -20,6 +20,7 @@ from kubernetes import client
 from sqlalchemy.orm import Session
 
 from mlrun.api.db.base import DBInterface
+from mlrun.config import config as mlconf
 from mlrun.execution import MLClientCtx
 from mlrun.model import RunObject
 from mlrun.runtimes.base import BaseRuntimeHandler, RunStates
@@ -53,6 +54,7 @@ class MPIV1ResourceSpec(MPIResourceSpec):
         node_name=None,
         node_selector=None,
         affinity=None,
+        priority_class_name=None,
     ):
         super().__init__(
             command=command,
@@ -76,6 +78,7 @@ class MPIV1ResourceSpec(MPIResourceSpec):
             node_name=node_name,
             node_selector=node_selector,
             affinity=affinity,
+            priority_class_name=priority_class_name,
         )
         self.clean_pod_policy = clean_pod_policy or MPIJobV1CleanPodPolicies.default()
 
@@ -129,25 +132,16 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
     def _update_container(self, struct, key, value):
         struct["spec"]["containers"][0][key] = value
 
-    def _enrich_launcher_configurations(self, launcher_pod_template):
-        quoted_args = []
-        for arg in self.spec.args:
-            quoted_args.append(shlex.quote(arg))
+    def _enrich_launcher_configurations(self, launcher_pod_template, args):
+        quoted_args = args or []
         quoted_mpi_args = []
         for arg in self.spec.mpi_args:
             quoted_mpi_args.append(shlex.quote(arg))
-        if self.spec.command:
-            self._update_container(
-                launcher_pod_template,
-                "command",
-                [
-                    "mpirun",
-                    *quoted_mpi_args,
-                    "python",
-                    shlex.quote(self.spec.command),
-                    *quoted_args,
-                ],
-            )
+        self._update_container(
+            launcher_pod_template,
+            "command",
+            ["mpirun", *quoted_mpi_args, *quoted_args],
+        )
 
     def _enrich_worker_configurations(self, worker_pod_template):
         if self.spec.resources:
@@ -166,6 +160,7 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
         # start by populating pod templates
         launcher_pod_template = deepcopy(self._mpijob_pod_template)
         worker_pod_template = deepcopy(self._mpijob_pod_template)
+        command, args, extra_env = self._get_cmd_args(runobj)
 
         # configuration for both launcher and workers
         for pod_template in [launcher_pod_template, worker_pod_template]:
@@ -174,8 +169,6 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
             self._update_container(
                 pod_template, "volumeMounts", self.spec.volume_mounts
             )
-            extra_env = self._generate_runtime_env(runobj)
-            extra_env = [{"name": k, "value": v} for k, v in extra_env.items()]
             self._update_container(pod_template, "env", extra_env + self.spec.env)
             if self.spec.image_pull_policy:
                 self._update_container(
@@ -196,6 +189,14 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
             update_in(
                 pod_template, "spec.affinity", self.spec._get_sanitized_affinity()
             )
+            if self.spec.priority_class_name and len(
+                mlconf.get_valid_function_priority_class_names()
+            ):
+                update_in(
+                    pod_template,
+                    "spec.priorityClassName",
+                    self.spec.priority_class_name,
+                )
 
         # configuration for workers only
         # update resources only for workers because the launcher
@@ -203,7 +204,7 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
         self._enrich_worker_configurations(worker_pod_template)
 
         # configuration for launcher only
-        self._enrich_launcher_configurations(launcher_pod_template)
+        self._enrich_launcher_configurations(launcher_pod_template, [command] + args)
 
         # generate mpi job using both pod templates
         job = self._generate_mpi_job_template(
@@ -289,7 +290,7 @@ class MpiV1RuntimeHandler(BaseRuntimeHandler):
         return in_terminal_state, completion_time, desired_run_state
 
     @staticmethod
-    def _consider_run_on_resources_deletion() -> bool:
+    def _are_resources_coupled_to_run_object() -> bool:
         return True
 
     @staticmethod
@@ -297,8 +298,8 @@ class MpiV1RuntimeHandler(BaseRuntimeHandler):
         return f"mlrun/uid={object_id}"
 
     @staticmethod
-    def _get_default_label_selector() -> str:
-        return "mlrun/class=mpijob"
+    def _get_possible_mlrun_class_label_values() -> typing.List[str]:
+        return ["mpijob"]
 
     @staticmethod
     def _get_crd_info() -> typing.Tuple[str, str, str]:
