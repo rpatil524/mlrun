@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ in_kfp = True
 
 @dsl.pipeline(name="Demo training pipeline", description="Shows how to use mlrun.")
 def newpipe():
-
     project = get_current_project()
 
     # build our ingestion function (container image)
@@ -52,7 +51,7 @@ def newpipe():
 
     # train with hyper-paremeters
     train = run_function(
-        "auto_trainer",
+        "auto-trainer",
         name="train",
         params={"label_columns": LABELS, "train_test_split_size": 0.10},
         hyperparams={
@@ -70,7 +69,7 @@ def newpipe():
 
     # test and visualize our model
     run_function(
-        "auto_trainer",
+        "auto-trainer",
         name="test",
         handler="evaluate",
         params={"label_columns": LABELS, "model": train.outputs["model"]},
@@ -80,15 +79,15 @@ def newpipe():
     )
 
     # deploy our model as a serverless function, we can pass a list of models to serve
-    deploy = deploy_function(
+    deploy_function(
         "serving",
         models=[{"key": f"{DATASET}:v1", "model_path": train.outputs["model"]}],
     )
-
-    # test out new model server (via REST API calls), use imported function
-    run_function(
-        "hub://v2_model_tester",
-        name="model-tester",
-        params={"addr": deploy.outputs["endpoint"], "model": f"{DATASET}:v1"},
-        inputs={"table": train.outputs["test_set"]},
-    )
+    # TODO: Add the following function once v2-model-tester is fixed
+    # # test out new model server (via REST API calls), use imported function
+    # run_function(
+    #     "hub://v2-model-tester",
+    #     name="model-tester",
+    #     params={"addr": deploy.outputs["endpoint"], "model": f"{DATASET}:v1"},
+    #     inputs={"table": train.outputs["test_set"]},
+    # )

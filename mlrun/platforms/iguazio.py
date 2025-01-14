@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,276 +15,17 @@
 import json
 import os
 import urllib
-from collections import namedtuple
-from datetime import datetime
-from http import HTTPStatus
+from typing import Optional
 from urllib.parse import urlparse
 
-import kfp.dsl
 import requests
-import semver
-import urllib3
 import v3io
-from deprecated import deprecated
 
 import mlrun.errors
 from mlrun.config import config as mlconf
-from mlrun.errors import err_to_str
 from mlrun.utils import dict_to_json
 
 _cached_control_session = None
-
-VolumeMount = namedtuple("Mount", ["path", "sub_path"])
-
-
-# TODO: Remove in 1.5.0
-@deprecated(
-    version="1.3.0",
-    reason="'mount_v3io_extended' will be removed in 1.5.0, use 'mount_v3io' instead",
-    category=FutureWarning,
-)
-def mount_v3io_extended(
-    name="v3io", remote="", mounts=None, access_key="", user="", secret=None
-):
-    """Modifier function to apply to a Container Op to volume mount a v3io path
-    :param name:            the volume name
-    :param remote:          the v3io path to use for the volume. ~/ prefix will be replaced with /users/<username>/
-    :param mounts:          list of mount & volume sub paths (type VolumeMount).
-                            empty mounts & remote will default to mount /v3io & /User.
-    :param access_key:      the access key used to auth against v3io. if not given V3IO_ACCESS_KEY env var will be used
-    :param user:            the username used to auth against v3io. if not given V3IO_USERNAME env var will be used
-    :param secret:          k8s secret name which would be used to get the username and access key to auth against v3io.
-    """
-    return mount_v3io(
-        name=name,
-        remote=remote,
-        volume_mounts=mounts,
-        access_key=access_key,
-        user=user,
-        secret=secret,
-    )
-
-
-def mount_v3io(
-    name="v3io",
-    remote="",
-    access_key="",
-    user="",
-    secret=None,
-    volume_mounts=None,
-):
-    """Modifier function to apply to a Container Op to volume mount a v3io path
-
-    :param name:            the volume name
-    :param remote:          the v3io path to use for the volume. ~/ prefix will be replaced with /users/<username>/
-    :param access_key:      the access key used to auth against v3io. if not given V3IO_ACCESS_KEY env var will be used
-    :param user:            the username used to auth against v3io. if not given V3IO_USERNAME env var will be used
-    :param secret:          k8s secret name which would be used to get the username and access key to auth against v3io.
-    :param volume_mounts:   list of VolumeMount. empty volume mounts & remote will default to mount /v3io & /User.
-    """
-    volume_mounts, user = _enrich_and_validate_v3io_mounts(
-        remote=remote,
-        volume_mounts=volume_mounts,
-        user=user,
-    )
-
-    def _attach_volume_mounts_and_creds(container_op: kfp.dsl.ContainerOp):
-        from kubernetes import client as k8s_client
-
-        vol = v3io_to_vol(name, remote, access_key, user, secret=secret)
-        container_op.add_volume(vol)
-        for volume_mount in volume_mounts:
-            container_op.container.add_volume_mount(
-                k8s_client.V1VolumeMount(
-                    mount_path=volume_mount.path,
-                    sub_path=volume_mount.sub_path,
-                    name=name,
-                )
-            )
-
-        if not secret:
-            container_op = v3io_cred(access_key=access_key, user=user)(container_op)
-        return container_op
-
-    return _attach_volume_mounts_and_creds
-
-
-# TODO: Remove in 1.5.0
-@deprecated(
-    version="1.3.0",
-    reason="'mount_v3io_legacy' will be removed in 1.5.0, use 'mount_v3io' instead",
-    category=FutureWarning,
-)
-def mount_v3io_legacy(
-    name="v3io", remote="~/", mount_path="/User", access_key="", user="", secret=None
-):
-    """Modifier function to apply to a Container Op to volume mount a v3io path
-    :param name:            the volume name
-    :param remote:          the v3io path to use for the volume. ~/ prefix will be replaced with /users/<username>/
-    :param mount_path:      the volume mount path
-    :param access_key:      the access key used to auth against v3io. if not given V3IO_ACCESS_KEY env var will be used
-    :param user:            the username used to auth against v3io. if not given V3IO_USERNAME env var will be used
-    :param secret:          k8s secret name which would be used to get the username and access key to auth against v3io.
-    """
-    return mount_v3io(
-        name=name,
-        remote=remote,
-        volume_mounts=[VolumeMount(path=mount_path, sub_path="")],
-        access_key=access_key,
-        user=user,
-        secret=secret,
-    )
-
-
-def _enrich_and_validate_v3io_mounts(remote="", volume_mounts=None, user=""):
-    if remote and not volume_mounts:
-        raise mlrun.errors.MLRunInvalidArgumentError(
-            "volume_mounts must be specified when remote is given"
-        )
-
-    # Empty remote & volume_mounts defaults are volume mounts of /v3io and /User
-    if not remote and not volume_mounts:
-        user = _resolve_mount_user(user)
-        if not user:
-            raise mlrun.errors.MLRunInvalidArgumentError(
-                "user name/env must be specified when using empty remote and volume_mounts"
-            )
-        volume_mounts = [
-            VolumeMount(path="/v3io", sub_path=""),
-            VolumeMount(path="/User", sub_path="users/" + user),
-        ]
-
-    if not isinstance(volume_mounts, list) and any(
-        [not isinstance(x, VolumeMount) for x in volume_mounts]
-    ):
-        raise TypeError("mounts should be a list of Mount")
-
-    return volume_mounts, user
-
-
-def _resolve_mount_user(user=None):
-    return user or os.environ.get("V3IO_USERNAME")
-
-
-def mount_spark_conf():
-    def _mount_spark(container_op: kfp.dsl.ContainerOp):
-        from kubernetes import client as k8s_client
-
-        container_op.container.add_volume_mount(
-            k8s_client.V1VolumeMount(
-                name="spark-master-config", mount_path="/etc/config/spark"
-            )
-        )
-        return container_op
-
-    return _mount_spark
-
-
-def mount_v3iod(namespace, v3io_config_configmap):
-    def _mount_v3iod(container_op: kfp.dsl.ContainerOp):
-        from kubernetes import client as k8s_client
-
-        def add_vol(name, mount_path, host_path):
-            vol = k8s_client.V1Volume(
-                name=name,
-                host_path=k8s_client.V1HostPathVolumeSource(path=host_path, type=""),
-            )
-            container_op.add_volume(vol)
-            container_op.container.add_volume_mount(
-                k8s_client.V1VolumeMount(mount_path=mount_path, name=name)
-            )
-
-        # this is a legacy path for the daemon shared memory
-        host_path = "/dev/shm/"
-
-        # path to shared memory for daemon was changed in Iguazio 3.2.3-b1
-        igz_version = mlrun.mlconf.get_parsed_igz_version()
-        if igz_version and igz_version >= semver.VersionInfo.parse("3.2.3-b1"):
-            host_path = "/var/run/iguazio/dayman-shm/"
-        add_vol(name="shm", mount_path="/dev/shm", host_path=host_path + namespace)
-
-        add_vol(
-            name="v3iod-comm",
-            mount_path="/var/run/iguazio/dayman",
-            host_path="/var/run/iguazio/dayman/" + namespace,
-        )
-
-        vol = k8s_client.V1Volume(
-            name="daemon-health", empty_dir=k8s_client.V1EmptyDirVolumeSource()
-        )
-        container_op.add_volume(vol)
-        container_op.container.add_volume_mount(
-            k8s_client.V1VolumeMount(
-                mount_path="/var/run/iguazio/daemon_health", name="daemon-health"
-            )
-        )
-
-        vol = k8s_client.V1Volume(
-            name="v3io-config",
-            config_map=k8s_client.V1ConfigMapVolumeSource(
-                name=v3io_config_configmap, default_mode=420
-            ),
-        )
-        container_op.add_volume(vol)
-        container_op.container.add_volume_mount(
-            k8s_client.V1VolumeMount(mount_path="/etc/config/v3io", name="v3io-config")
-        )
-
-        container_op.container.add_env_variable(
-            k8s_client.V1EnvVar(
-                name="CURRENT_NODE_IP",
-                value_from=k8s_client.V1EnvVarSource(
-                    field_ref=k8s_client.V1ObjectFieldSelector(
-                        api_version="v1", field_path="status.hostIP"
-                    )
-                ),
-            )
-        )
-        container_op.container.add_env_variable(
-            k8s_client.V1EnvVar(
-                name="IGZ_DATA_CONFIG_FILE", value="/igz/java/conf/v3io.conf"
-            )
-        )
-
-        return container_op
-
-    return _mount_v3iod
-
-
-def v3io_cred(api="", user="", access_key=""):
-    """
-    Modifier function to copy local v3io env vars to container
-
-    Usage::
-
-        train = train_op(...)
-        train.apply(use_v3io_cred())
-    """
-
-    def _use_v3io_cred(container_op: kfp.dsl.ContainerOp):
-        from os import environ
-
-        from kubernetes import client as k8s_client
-
-        web_api = api or environ.get("V3IO_API") or mlconf.v3io_api
-        _user = user or environ.get("V3IO_USERNAME")
-        _access_key = access_key or environ.get("V3IO_ACCESS_KEY")
-        v3io_framesd = mlconf.v3io_framesd or environ.get("V3IO_FRAMESD")
-
-        return (
-            container_op.container.add_env_variable(
-                k8s_client.V1EnvVar(name="V3IO_API", value=web_api)
-            )
-            .add_env_variable(k8s_client.V1EnvVar(name="V3IO_USERNAME", value=_user))
-            .add_env_variable(
-                k8s_client.V1EnvVar(name="V3IO_ACCESS_KEY", value=_access_key)
-            )
-            .add_env_variable(
-                k8s_client.V1EnvVar(name="V3IO_FRAMESD", value=v3io_framesd)
-            )
-        )
-
-    return _use_v3io_cred
 
 
 def split_path(mntpath=""):
@@ -305,11 +46,13 @@ def v3io_to_vol(name, remote="~/", access_key="", user="", secret=None):
 
     access_key = access_key or environ.get("V3IO_ACCESS_KEY")
     opts = {"accessKey": access_key}
+    user = user or environ.get("V3IO_USERNAME")
+    if user:
+        opts["dirsToCreate"] = f'[{{"name": "users//{user}", "permissions": 488}}]'
 
     remote = str(remote)
 
     if remote.startswith("~/"):
-        user = user or environ.get("V3IO_USERNAME")
         if not user:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 'user name/env must be specified when using "~" in path'
@@ -326,7 +69,6 @@ def v3io_to_vol(name, remote="~/", access_key="", user="", secret=None):
     if secret:
         secret = {"name": secret}
 
-    # vol = client.V1Volume(name=name, flex_volume=client.V1FlexVolumeSource('v3io/fuse', options=opts))
     vol = {
         "flexVolume": client.V1FlexVolumeSource(
             "v3io/fuse", options=opts, secret_ref=secret
@@ -356,36 +98,43 @@ class OutputStream:
 
         self._v3io_client = v3io.dataplane.Client(**v3io_client_kwargs)
         self._container, self._stream_path = split_path(stream_path)
+        self._shards = shards
+        self._retention_in_hours = retention_in_hours
+        self._create = create
+        self._endpoint = endpoint
         self._mock = mock
         self._mock_queue = []
 
-        if create and not mock:
+    def create_stream(self):
+        # this import creates an import loop via the utils module, so putting it in execution path
+        from mlrun.utils.helpers import logger
 
-            # this import creates an import loop via the utils module, so putting it in execution path
-            from mlrun.utils.helpers import logger
+        logger.debug(
+            "Creating output stream",
+            endpoint=self._endpoint,
+            container=self._container,
+            stream_path=self._stream_path,
+            shards=self._shards,
+            retention_in_hours=self._retention_in_hours,
+        )
+        response = self._v3io_client.stream.create(
+            container=self._container,
+            stream_path=self._stream_path,
+            shard_count=self._shards or 1,
+            retention_period_hours=self._retention_in_hours or 24,
+            raise_for_status=v3io.dataplane.RaiseForStatus.never,
+        )
+        if not (response.status_code == 400 and "ResourceInUse" in str(response.body)):
+            response.raise_for_status([409, 204])
 
-            logger.debug(
-                "Creating output stream",
-                endpoint=endpoint,
-                container=self._container,
-                stream_path=self._stream_path,
-                shards=shards,
-                retention_in_hours=retention_in_hours,
-            )
+    def _lazy_init(self):
+        if self._create and not self._mock:
+            self._create = False
+            self.create_stream()
 
-            response = self._v3io_client.create_stream(
-                container=self._container,
-                path=self._stream_path,
-                shard_count=shards or 1,
-                retention_period_hours=retention_in_hours or 24,
-                raise_for_status=v3io.dataplane.RaiseForStatus.never,
-            )
-            if not (
-                response.status_code == 400 and "ResourceInUse" in str(response.body)
-            ):
-                response.raise_for_status([409, 204])
+    def push(self, data, partition_key=None):
+        self._lazy_init()
 
-    def push(self, data):
         def dump_record(rec):
             if not isinstance(rec, (str, bytes)):
                 return dict_to_json(rec)
@@ -393,14 +142,53 @@ class OutputStream:
 
         if not isinstance(data, list):
             data = [data]
-        records = [{"data": dump_record(rec)} for rec in data]
+
+        records = []
+        for rec in data:
+            record = {"data": dump_record(rec)}
+            if partition_key is not None:
+                record["partition_key"] = partition_key
+            records.append(record)
+
         if self._mock:
             # for mock testing
             self._mock_queue.extend(records)
         else:
-            self._v3io_client.put_records(
-                container=self._container, path=self._stream_path, records=records
+            self._v3io_client.stream.put_records(
+                container=self._container,
+                stream_path=self._stream_path,
+                records=records,
             )
+
+
+class HTTPOutputStream:
+    """HTTP output source that usually used for CE mode and debugging process"""
+
+    def __init__(self, stream_path: str):
+        self._stream_path = stream_path
+
+    def push(self, data):
+        def dump_record(rec):
+            if isinstance(rec, bytes):
+                return rec
+
+            if not isinstance(rec, str):
+                rec = dict_to_json(rec)
+
+            return rec.encode("UTF-8")
+
+        if not isinstance(data, list):
+            data = [data]
+
+        for record in data:
+            # Convert the new record to the required format
+            serialized_record = dump_record(record)
+            response = requests.post(self._stream_path, data=serialized_record)
+            if not response:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"API call failed push a new record through {self._stream_path}, "
+                    f"status {response.status_code}: {response.reason}"
+                )
 
 
 class KafkaOutputStream:
@@ -434,7 +222,7 @@ class KafkaOutputStream:
 
         self._initialized = True
 
-    def push(self, data):
+    def push(self, data, partition_key=None):
         self._lazy_init()
 
         def dump_record(rec):
@@ -455,11 +243,17 @@ class KafkaOutputStream:
         else:
             for record in data:
                 serialized_record = dump_record(record)
-                self._kafka_producer.send(self._topic, serialized_record)
+                if isinstance(partition_key, str):
+                    partition_key = partition_key.encode("UTF-8")
+                self._kafka_producer.send(
+                    self._topic, serialized_record, key=partition_key
+                )
 
 
 class V3ioStreamClient:
-    def __init__(self, url: str, shard_id: int = 0, seek_to: str = None, **kwargs):
+    def __init__(
+        self, url: str, shard_id: int = 0, seek_to: Optional[str] = None, **kwargs
+    ):
         endpoint, stream_path = parse_path(url)
         seek_options = ["EARLIEST", "LATEST", "TIME", "SEQUENCE"]
         seek_to = seek_to or "LATEST"
@@ -513,25 +307,6 @@ class V3ioStreamClient:
         return response.output.records
 
 
-def create_control_session(url, username, password):
-    # for systems without production cert - silence no cert verification WARN
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    if not username or not password:
-        raise ValueError("cannot create session key, missing username or password")
-
-    session = requests.Session()
-    session.auth = (username, password)
-    try:
-        auth = session.post(f"{url}/api/sessions", verify=False)
-    except OSError as exc:
-        raise OSError(f"error: cannot connect to {url}: {err_to_str(exc)}")
-
-    if not auth.ok:
-        raise OSError(f"failed to create session: {url}, {auth.text}")
-
-    return auth.json()["data"]["id"]
-
-
 def is_iguazio_endpoint(endpoint_url: str) -> bool:
     # TODO: find a better heuristic
     return ".default-tenant." in endpoint_url
@@ -558,21 +333,6 @@ def is_iguazio_session_cookie(session_cookie: str) -> bool:
         return False
 
 
-def is_iguazio_system_2_10_or_above(dashboard_url):
-    # for systems without production cert - silence no cert verification WARN
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = requests.get(f"{dashboard_url}/api/external_versions", verify=False)
-
-    if not response.ok:
-        if response.status_code == HTTPStatus.NOT_FOUND.value:
-            # in iguazio systems prior to 2.10 this endpoint didn't exist, so the api returns 404 cause endpoint not
-            # found
-            return False
-        response.raise_for_status()
-
-    return True
-
-
 # we assign the control session or access key to the password since this is iguazio auth scheme
 # (requests should be sent with username:control_session/access_key as auth header)
 def add_or_refresh_credentials(
@@ -588,8 +348,8 @@ def add_or_refresh_credentials(
     # different access keys for the 2 usages
     token = (
         token
-        # can't use mlrun.runtimes.constants.FunctionEnvironmentVariables.auth_session cause this is running in the
-        # import execution path (when we're initializing the run db) and therefore we can't import mlrun.runtimes
+        # can't use mlrun.common.runtimes.constants.FunctionEnvironmentVariables.auth_session cause this is running
+        # in the import execution path (when we're initializing the run db) and therefore we can't import mlrun.runtimes
         or os.environ.get("MLRUN_AUTH_SESSION")
         or os.environ.get("V3IO_ACCESS_KEY")
     )
@@ -602,33 +362,12 @@ def add_or_refresh_credentials(
     # (ideally if we could identify we're in enterprise we would have verify here that token and username have value)
     if not is_iguazio_endpoint(api_url):
         return "", "", token
-    iguazio_dashboard_url = "https://dashboard" + api_url[api_url.find(".") :]
 
-    # in 2.8 mlrun api is protected with control session, from 2.10 it's protected with access key
-    is_access_key_auth = is_iguazio_system_2_10_or_above(iguazio_dashboard_url)
-    if is_access_key_auth:
-        if not username or not token:
-            raise ValueError(
-                "username and access key required to authenticate against iguazio system"
-            )
-        return username, token, ""
-
-    if not username or not password:
-        raise ValueError("username and password needed to create session")
-
-    global _cached_control_session
-    now = datetime.now()
-    if _cached_control_session:
-        if (
-            _cached_control_session[2] == username
-            and _cached_control_session[3] == password
-            and (now - _cached_control_session[1]).seconds < 20 * 60 * 60
-        ):
-            return _cached_control_session[2], _cached_control_session[0], ""
-
-    control_session = create_control_session(iguazio_dashboard_url, username, password)
-    _cached_control_session = (control_session, now, username, password)
-    return username, control_session, ""
+    if not username or not token:
+        raise ValueError(
+            "username and access key required to authenticate against iguazio system"
+        )
+    return username, token, ""
 
 
 def parse_path(url, suffix="/"):
@@ -636,7 +375,9 @@ def parse_path(url, suffix="/"):
     parsed_url = urlparse(url)
     if parsed_url.netloc:
         scheme = parsed_url.scheme.lower()
-        if scheme == "v3ios":
+        if scheme == "s3":
+            prefix = "s3"
+        elif scheme == "v3ios":
             prefix = "https"
         elif scheme == "v3io":
             prefix = "http"
@@ -644,12 +385,16 @@ def parse_path(url, suffix="/"):
             prefix = "redis"
         elif scheme == "rediss":
             prefix = "rediss"
+        elif scheme == "ds":
+            prefix = "ds"
         else:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "url must start with v3io/v3ios/redis/rediss, got " + url
             )
         endpoint = f"{prefix}://{parsed_url.netloc}"
     else:
+        # no netloc is mainly when using v3io (v3io:///) and expecting the url to be resolved automatically from env or
+        # config
         endpoint = None
     return endpoint, parsed_url.path.strip("/") + suffix
 
@@ -660,3 +405,22 @@ def sanitize_username(username: str):
     So simply replace it with dash
     """
     return username.replace("_", "-")
+
+
+def min_iguazio_versions(*versions):
+    def decorator(function):
+        def wrapper(*args, **kwargs):
+            if mlrun.utils.helpers.validate_component_version_compatibility(
+                "iguazio", *versions
+            ):
+                return function(*args, **kwargs)
+
+            message = (
+                f"{function.__name__} is supported since Iguazio {' or '.join(versions)}, currently using "
+                f"Iguazio {mlconf.igz_version}."
+            )
+            raise mlrun.errors.MLRunIncompatibleVersionError(message)
+
+        return wrapper
+
+    return decorator

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import unittest.mock
 import numpy as np
 import pandas as pd
 import pytest
+import storey
 
 import mlrun
 import mlrun.feature_store as fstore
@@ -105,8 +106,7 @@ def test_pandas_step_onehot(rundb_mock, entities, set_index_before):
     output_path = tempfile.TemporaryDirectory()
 
     # Ingest our dataset through our defined pipeline
-    df_pandas = fstore.ingest(
-        data_set_pandas,
+    df_pandas = data_set_pandas.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -128,6 +128,9 @@ def test_pandas_step_onehot(rundb_mock, entities, set_index_before):
             },
             index=data["id"].values,
         )
+        # pandas 2 assert_frame_equal actually checks the index name(s), so we need it
+        data_ref.index.name = "id"
+        data_ref.index.names = ["id"]
     else:
         data_ref = pd.DataFrame(
             {
@@ -145,6 +148,9 @@ def test_pandas_step_onehot(rundb_mock, entities, set_index_before):
             },
             index=[data["id"].values, data["name"].values],
         )
+        # pandas 2 assert_frame_equal actually checks the index name(s), so we need it
+        data_ref.index.name = None
+        data_ref.index.names = ["id", "name"]
 
     assert isinstance(df_pandas, pd.DataFrame)
     pd.testing.assert_frame_equal(
@@ -172,8 +178,7 @@ def test_pandas_step_onehot(rundb_mock, entities, set_index_before):
     data_set.purge_targets = unittest.mock.Mock()
 
     # Ingest our dataset through our defined pipeline
-    df = fstore.ingest(
-        data_set,
+    df = data_set.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -216,8 +221,7 @@ def test_pandas_step_imputer(rundb_mock, entities, set_index_before):
     output_path = tempfile.TemporaryDirectory()
 
     # Ingest our dataset through our defined pipeline
-    df_pandas = fstore.ingest(
-        data_set_pandas,
+    df_pandas = data_set_pandas.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -248,8 +252,7 @@ def test_pandas_step_imputer(rundb_mock, entities, set_index_before):
     data_set.purge_targets = unittest.mock.Mock()
 
     # Ingest our dataset through our defined pipeline
-    df = fstore.ingest(
-        data_set,
+    df = data_set.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -300,8 +303,7 @@ def test_pandas_step_mapval(rundb_mock, with_original, entities, set_index_befor
     output_path = tempfile.TemporaryDirectory()
 
     # Ingest our  dataset through our defined pipeline
-    df_pandas = fstore.ingest(
-        data_set_pandas,
+    df_pandas = data_set_pandas.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -318,6 +320,13 @@ def test_pandas_step_mapval(rundb_mock, with_original, entities, set_index_befor
         if len(entities) > 1:
             index = [data[ent].values for ent in entities]
         data_ref = pd.DataFrame({"age": age, "department": department}, index=index)
+        # pandas 2 assert_frame_equal actually checks the index name(s), so we need it
+        if len(entities) > 1:
+            data_ref.index.name = None
+            data_ref.index.names = entities
+        else:
+            data_ref.index.name = "id"
+            data_ref.index.names = ["id"]
 
     assert isinstance(df_pandas, pd.DataFrame)
     pd.testing.assert_frame_equal(
@@ -352,8 +361,7 @@ def test_pandas_step_mapval(rundb_mock, with_original, entities, set_index_befor
     data_set.purge_targets = unittest.mock.Mock()
 
     # Ingest our dataset through our defined pipeline
-    df = fstore.ingest(
-        data_set,
+    df = data_set.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -403,8 +411,7 @@ def test_pandas_step_data_extractor(
     output_path = tempfile.TemporaryDirectory()
 
     # Ingest our dataset through our defined pipeline
-    df_pandas = fstore.ingest(
-        data_set_pandas,
+    df_pandas = data_set_pandas.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -442,8 +449,7 @@ def test_pandas_step_data_extractor(
     data_set.purge_targets = unittest.mock.Mock()
 
     # Ingest our dataset through our defined pipeline
-    df = fstore.ingest(
-        data_set,
+    df = data_set.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -456,6 +462,87 @@ def test_pandas_step_data_extractor(
         check_like=True,
         check_names=True,
     )
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"age": {"ranges": {"one": [0, 30], "two": ["a", "inf"]}}},
+        {"names": {"A": 1, "B": False}},
+    ],
+)
+def test_mapvalues_mixed_types_validator(rundb_mock, mapping):
+    data, _ = get_data()
+    data_to_ingest = data.copy()
+    # Define the corresponding FeatureSet
+    data_set_pandas = fstore.FeatureSet(
+        "fs-new",
+        entities=[fstore.Entity("id")],
+        description="feature set",
+        engine="pandas",
+    )
+    # Pre-processing grpah steps
+    data_set_pandas.graph.to(
+        MapValues(
+            mapping=mapping,
+            with_original_features=True,
+        )
+    )
+    data_set_pandas._run_db = rundb_mock
+
+    data_set_pandas.reload = unittest.mock.Mock()
+    data_set_pandas.save = unittest.mock.Mock()
+    data_set_pandas.purge_targets = unittest.mock.Mock()
+    # Create a temp directory:
+    output_path = tempfile.TemporaryDirectory()
+
+    with pytest.raises(
+        mlrun.errors.MLRunInvalidArgumentError,
+        match=f"^MapValues - mapping values of the same column must be in the same type, which was not the case for"
+        f" Column '{list(mapping.keys())[0]}'$",
+    ):
+        data_set_pandas.ingest(
+            data_to_ingest,
+            targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
+        )
+
+
+def test_mapvalues_combined_mapping_validator(rundb_mock):
+    data, _ = get_data()
+    data_to_ingest = data.copy()
+    # Define the corresponding FeatureSet
+    data_set_pandas = fstore.FeatureSet(
+        "fs-new",
+        entities=[fstore.Entity("id")],
+        description="feature set",
+        engine="pandas",
+    )
+    # Pre-processing grpah steps
+    data_set_pandas.graph.to(
+        MapValues(
+            mapping={
+                "age": {"ranges": {"one": [0, 30], "two": ["a", "inf"]}, 4: "kid"}
+            },
+            with_original_features=True,
+        )
+    )
+    data_set_pandas._run_db = rundb_mock
+
+    data_set_pandas.reload = unittest.mock.Mock()
+    data_set_pandas.save = unittest.mock.Mock()
+    data_set_pandas.purge_targets = unittest.mock.Mock()
+    # Create a temp directory:
+    output_path = tempfile.TemporaryDirectory()
+
+    with pytest.raises(
+        mlrun.errors.MLRunInvalidArgumentError,
+        match="^MapValues - mapping values of the same column can not combine ranges and single "
+        "replacement, which is the case for column 'age'$",
+    ):
+        data_set_pandas.ingest(
+            data_to_ingest,
+            targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
+        )
 
 
 @pytest.mark.parametrize("set_index_before", [True, False, 0])
@@ -489,8 +576,7 @@ def test_pandas_step_data_validator(rundb_mock, entities, set_index_before):
     output_path = tempfile.TemporaryDirectory()
 
     # Ingest our dataset through our defined pipeline
-    df_pandas = fstore.ingest(
-        data_set_pandas,
+    df_pandas = data_set_pandas.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -525,8 +611,7 @@ def test_pandas_step_data_validator(rundb_mock, entities, set_index_before):
     data_set.purge_targets = unittest.mock.Mock()
 
     # Ingest our dataset through our defined pipeline
-    df = fstore.ingest(
-        data_set,
+    df = data_set.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -568,8 +653,7 @@ def test_pandas_step_drop_feature(rundb_mock, entities, set_index_before):
     output_path = tempfile.TemporaryDirectory()
 
     # Ingest our dataset through our defined pipeline
-    df_pandas = fstore.ingest(
-        data_set_pandas,
+    df_pandas = data_set_pandas.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -601,8 +685,7 @@ def test_pandas_step_drop_feature(rundb_mock, entities, set_index_before):
     data_set.purge_targets = unittest.mock.Mock()
 
     # Ingest our dataset through our defined pipeline
-    df = fstore.ingest(
-        data_set,
+    df = data_set.ingest(
         data_to_ingest,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
@@ -642,14 +725,66 @@ def test_imputer_default_value(rundb_mock, engine):
     feature_set.save = unittest.mock.Mock()
     feature_set.purge_targets = unittest.mock.Mock()
 
-    imputed_df = fstore.ingest(
-        featureset=feature_set,
+    imputed_df = feature_set.ingest(
         source=data_with_nones,
         targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
     )
 
     # Checking that the ingested dataframe is none-free:
     assert not imputed_df.isnull().values.any()
+
+
+class MyChoice(storey.Choice):
+    def select_outlets(self, event):
+        outlets = []
+        r = event["routing"]
+        if r == "target1" or r == "both":
+            outlets.append("target1")
+        if r == "target2" or r == "both":
+            outlets.append("target2")
+        return outlets
+
+
+def test_choice(rundb_mock):
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "routing": ["target1", "target2", "both", "neither"],
+        }
+    )
+    feature_set = fstore.FeatureSet(
+        "fs-default-value",
+        entities=["id"],
+        description="feature set with nones",
+    )
+    feature_set.graph.to("MyChoice")
+
+    # Mocking
+    output_path = tempfile.TemporaryDirectory()
+    feature_set._run_db = rundb_mock
+    feature_set.reload = unittest.mock.Mock()
+    feature_set.save = unittest.mock.Mock()
+    feature_set.purge_targets = unittest.mock.Mock()
+
+    feature_set.ingest(
+        source=df,
+        targets=[
+            ParquetTarget(name="target1", path=f"{output_path.name}/target1.parquet"),
+            ParquetTarget(name="target2", path=f"{output_path.name}/target2.parquet"),
+        ],
+    )
+
+    read_back_df1 = pd.read_parquet(feature_set.get_target_path(name="target1"))
+    read_back_df2 = pd.read_parquet(feature_set.get_target_path(name="target2"))
+
+    pd.testing.assert_frame_equal(
+        read_back_df1.reset_index(),
+        df.iloc[[0, 2]].reset_index(drop=True),
+    )
+    pd.testing.assert_frame_equal(
+        read_back_df2.reset_index(),
+        df.iloc[[1, 2]].reset_index(drop=True),
+    )
 
 
 def get_data(with_none=False):
@@ -679,3 +814,31 @@ def get_data(with_none=False):
         },
     )
     return data, data_ref
+
+
+# ML-7868
+@pytest.mark.parametrize("engine", ["storey", "pandas"])
+def test_parquet_source_with_category(rundb_mock, engine):
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+        }
+    )
+    df["my_category"] = df["id"].astype("category")
+    feature_set = fstore.FeatureSet(
+        "fs-default-value",
+        entities=["id"],
+        engine=engine,
+    )
+
+    # Mocking
+    output_path = tempfile.TemporaryDirectory()
+    feature_set._run_db = rundb_mock
+    feature_set.reload = unittest.mock.Mock()
+    feature_set.save = unittest.mock.Mock()
+    feature_set.purge_targets = unittest.mock.Mock()
+
+    feature_set.ingest(
+        source=df,
+        targets=[ParquetTarget(path=f"{output_path.name}/temp.parquet")],
+    )

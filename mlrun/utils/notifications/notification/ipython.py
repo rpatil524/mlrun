@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 import typing
 
-import mlrun.api.schemas
+import mlrun.common.schemas
 import mlrun.lists
 import mlrun.utils.helpers
 
@@ -28,16 +28,16 @@ class IPythonNotification(NotificationBase):
 
     def __init__(
         self,
-        params: typing.Dict[str, str] = None,
+        name: typing.Optional[str] = None,
+        params: typing.Optional[dict[str, str]] = None,
+        default_params: typing.Optional[dict[str, str]] = None,
     ):
-        super().__init__(params)
+        super().__init__(name, params, default_params)
         self._ipython = None
         try:
             import IPython
 
-            ipy = IPython.get_ipython()
-            # if its IPython terminal ignore (can't show html)
-            if ipy and "Terminal" not in str(type(ipy)):
+            if mlrun.utils.helpers.is_running_in_jupyter_notebook():
                 self._ipython = IPython
         except ImportError:
             pass
@@ -49,11 +49,13 @@ class IPythonNotification(NotificationBase):
     def push(
         self,
         message: str,
-        severity: typing.Union[
-            mlrun.api.schemas.NotificationSeverity, str
-        ] = mlrun.api.schemas.NotificationSeverity.INFO,
-        runs: typing.Union[mlrun.lists.RunList, list] = None,
-        custom_html: str = None,
+        severity: typing.Optional[
+            typing.Union[mlrun.common.schemas.NotificationSeverity, str]
+        ] = mlrun.common.schemas.NotificationSeverity.INFO,
+        runs: typing.Optional[typing.Union[mlrun.lists.RunList, list]] = None,
+        custom_html: typing.Optional[typing.Optional[str]] = None,
+        alert: typing.Optional[mlrun.common.schemas.AlertConfig] = None,
+        event_data: typing.Optional[mlrun.common.schemas.Event] = None,
     ):
         if not self._ipython:
             mlrun.utils.helpers.logger.debug(

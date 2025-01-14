@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -111,7 +111,7 @@ class FunctionReference(ModelObj):
             code = self.code
             if kind == mlrun.runtimes.RuntimeKinds.serving:
                 code = code + mlrun_footer.format(
-                    mlrun.runtimes.serving.serving_subkind
+                    mlrun.runtimes.nuclio.serving.serving_subkind
                 )
             func = mlrun.new_function(
                 self.name, kind=kind, image=self.image or default_image

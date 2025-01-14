@@ -1,4 +1,4 @@
-# Copyright 2022 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Optional
+from urllib.parse import urlparse
 
 import redis
 import redis.cluster
@@ -28,22 +31,34 @@ class RedisStore(DataStore):
     - key and value sizes are limited to 512MB
     """
 
-    def __init__(self, parent, schema, name, endpoint="", secrets: dict = None):
+    def __init__(
+        self, parent, schema, name, endpoint="", secrets: Optional[dict] = None
+    ):
+        redis_default_port = "6379"
         super().__init__(parent, name, schema, endpoint, secrets=secrets)
         self.headers = None
 
         self.endpoint = self.endpoint or mlrun.mlconf.redis.url
+        parsed_endpoint = urlparse(self.endpoint)
+        if parsed_endpoint.scheme != "redis" and parsed_endpoint.scheme != "rediss":
+            parsed_endpoint = urlparse(f"{schema}://{self.endpoint}")
+        self.secure = parsed_endpoint.scheme == "rediss"
 
-        if self.endpoint.startswith("rediss://"):
-            self.endpoint = self.endpoint[len("rediss://") :]
-            self.secure = True
-        elif self.endpoint.startswith("redis://"):
-            self.endpoint = self.endpoint[len("redis://") :]
-            self.secure = False
-        elif self.endpoint == "":
-            raise NotImplementedError(f"invalid endpoint: {endpoint}")
-
-        self._redis_url = f"{schema}://{self.endpoint}"
+        if parsed_endpoint.username or parsed_endpoint.password:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "Provide Redis username and password only via secrets"
+            )
+        credentials_prefix = self._get_secret_or_env("CREDENTIALS_PREFIX")
+        user = self._get_secret_or_env("REDIS_USER", "", credentials_prefix)
+        password = self._get_secret_or_env("REDIS_PASSWORD", "", credentials_prefix)
+        host = parsed_endpoint.hostname
+        port = parsed_endpoint.port if parsed_endpoint.port else redis_default_port
+        schema = parsed_endpoint.scheme
+        if user or password:
+            endpoint = f"{schema}://{user}:{password}@{host}:{port}"
+        else:
+            endpoint = f"{schema}://{host}:{port}"
+        self._redis_url = endpoint
 
         self._redis = None
 
@@ -61,7 +76,8 @@ class RedisStore(DataStore):
 
         return self._redis
 
-    def get_filesystem(self, silent):
+    @property
+    def filesystem(self):
         return None  # no support for fsspec
 
     def supports_isdir(self):
@@ -69,12 +85,8 @@ class RedisStore(DataStore):
 
     @classmethod
     def build_redis_key(cls, key, prefix_only=False):
-        if key.startswith("redis://"):
-            start = len("redis://")
-        elif key.startswith("rediss://"):
-            start = key[len("redis://") :]
-        else:
-            start = 0
+        prefixes = ["redis://", "rediss://", "ds://"]
+        start = next((len(prefix) for prefix in prefixes if key.startswith(prefix)), 0)
         # skip over user/pass, host, port
         start = key.find("/", start)
         # insert the prefix '{' hashtag to the key as stored in redis
@@ -117,6 +129,7 @@ class RedisStore(DataStore):
 
     def put(self, key, data, append=False):
         key = RedisStore.build_redis_key(key)
+        data, _ = self._prepare_put_data(data, append)
         if append:
             self.redis.append(key, data)
         else:
@@ -143,7 +156,7 @@ class RedisStore(DataStore):
         if maxdepth is not None:
             raise NotImplementedError("maxdepth is not supported")
 
-        key = RedisStore.build_redis_key(key, prefix_only=True)
+        key = RedisStore.build_redis_key(key, prefix_only=recursive)
 
         if recursive:
             key += "*" if key.endswith("/") else "/*"
@@ -154,3 +167,7 @@ class RedisStore(DataStore):
                 self.redis.delete(k)
         else:
             self.redis.delete(key)
+
+    @property
+    def spark_url(self):
+        return ""

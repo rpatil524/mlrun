@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 from datetime import datetime
-from typing import Callable, Dict, List, Union
+from typing import Callable, Optional, Union
 
 import tensorflow as tf
 from packaging import version
@@ -38,10 +38,10 @@ class _TFKerasTensorboardLogger(TensorboardLogger):
 
     def __init__(
         self,
-        statistics_functions: List[Callable[[Union[Variable]], Union[float, Variable]]],
+        statistics_functions: list[Callable[[Union[Variable]], Union[float, Variable]]],
         context: mlrun.MLClientCtx = None,
-        tensorboard_directory: str = None,
-        run_name: str = None,
+        tensorboard_directory: Optional[str] = None,
+        run_name: Optional[str] = None,
         update_frequency: Union[int, str] = "epoch",
     ):
         """
@@ -67,7 +67,7 @@ class _TFKerasTensorboardLogger(TensorboardLogger):
                                       update. Notice that writing to tensorboard too frequently may cause the training
                                       to be slower. Default: 'epoch'.
         """
-        super(_TFKerasTensorboardLogger, self).__init__(
+        super().__init__(
             statistics_functions=statistics_functions,
             context=context,
             tensorboard_directory=tensorboard_directory,
@@ -253,17 +253,20 @@ class TensorboardLoggingCallback(LoggingCallback):
     def __init__(
         self,
         context: mlrun.MLClientCtx = None,
-        tensorboard_directory: str = None,
-        run_name: str = None,
-        weights: Union[bool, List[str]] = False,
-        statistics_functions: List[
-            Callable[[Union[Variable, Tensor]], Union[float, Tensor]]
+        tensorboard_directory: Optional[str] = None,
+        run_name: Optional[str] = None,
+        weights: Union[bool, list[str]] = False,
+        statistics_functions: Optional[
+            list[Callable[[Union[Variable, Tensor]], Union[float, Tensor]]]
         ] = None,
-        dynamic_hyperparameters: Dict[
-            str, Union[List[Union[str, int]], Callable[[], TFKerasTypes.TrackableType]]
+        dynamic_hyperparameters: Optional[
+            dict[
+                str,
+                Union[list[Union[str, int]], Callable[[], TFKerasTypes.TrackableType]],
+            ]
         ] = None,
-        static_hyperparameters: Dict[
-            str, Union[TFKerasTypes.TrackableType, List[Union[str, int]]]
+        static_hyperparameters: Optional[
+            dict[str, Union[TFKerasTypes.TrackableType, list[Union[str, int]]]]
         ] = None,
         update_frequency: Union[int, str] = "epoch",
         auto_log: bool = False,
@@ -325,7 +328,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         :raise MLRunInvalidArgumentError: In case both 'context' and 'tensorboard_directory' parameters were not given
                                           or the 'update_frequency' was incorrect.
         """
-        super(TensorboardLoggingCallback, self).__init__(
+        super().__init__(
             dynamic_hyperparameters=dynamic_hyperparameters,
             static_hyperparameters=static_hyperparameters,
             auto_log=auto_log,
@@ -352,7 +355,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         self._logged_model = False
         self._logged_hyperparameters = False
 
-    def get_weights(self) -> Dict[str, Variable]:
+    def get_weights(self) -> dict[str, Variable]:
         """
         Get the weights tensors tracked. The weights will be stored in a dictionary where each key is the weight's name
         and the value is the weight's parameter (tensor).
@@ -361,7 +364,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         """
         return self._logger.weights
 
-    def get_weights_statistics(self) -> Dict[str, Dict[str, List[float]]]:
+    def get_weights_statistics(self) -> dict[str, dict[str, list[float]]]:
         """
         Get the weights mean results logged. The results will be stored in a dictionary where each key is the weight's
         name and the value is a list of mean values per epoch.
@@ -370,7 +373,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         """
         return self._logger.weight_statistics
 
-    def on_train_begin(self, logs: dict = None):
+    def on_train_begin(self, logs: Optional[dict] = None):
         """
         Called once at the beginning of training process (one time call). Will log the pre-training (epoch 0)
         hyperparameters and weights.
@@ -401,14 +404,14 @@ class TensorboardLoggingCallback(LoggingCallback):
         # Make sure all values were written to the directory logs:
         self._logger.flush()
 
-    def on_train_end(self, logs: dict = None):
+    def on_train_end(self, logs: Optional[dict] = None):
         """
         Called at the end of training, wrapping up the tensorboard logging session.
 
         :param logs: Currently the output of the last call to `on_epoch_end()` is passed to this argument for this
                      method but that may change in the future.
         """
-        super(TensorboardLoggingCallback, self).on_train_end()
+        super().on_train_end()
 
         # Write the final run summary:
         self._logger.write_final_summary_text()
@@ -416,7 +419,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         # Close the logger:
         self._logger.close()
 
-    def on_test_begin(self, logs: dict = None):
+    def on_test_begin(self, logs: Optional[dict] = None):
         """
         Called at the beginning of evaluation or validation. Will be called on each epoch according to the validation
         per epoch configuration. In case it is an evaluation, the epoch 0 will be logged.
@@ -445,7 +448,7 @@ class TensorboardLoggingCallback(LoggingCallback):
             # Make sure all values were written to the directory logs:
             self._logger.flush()
 
-    def on_test_end(self, logs: dict = None):
+    def on_test_end(self, logs: Optional[dict] = None):
         """
         Called at the end of evaluation or validation. Will be called on each epoch according to the validation
         per epoch configuration. The recent evaluation / validation results will be summarized and logged.
@@ -453,7 +456,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         :param logs: Currently no data is passed to this argument for this method but that may change in the
                      future.
         """
-        super(TensorboardLoggingCallback, self).on_test_end(logs=logs)
+        super().on_test_end(logs=logs)
 
         # Check if needed to end the run (in case of evaluation and not training):
         if not self._is_training:
@@ -466,7 +469,7 @@ class TensorboardLoggingCallback(LoggingCallback):
             # Close the logger:
             self._logger.close()
 
-    def on_epoch_end(self, epoch: int, logs: dict = None):
+    def on_epoch_end(self, epoch: int, logs: Optional[dict] = None):
         """
         Called at the end of an epoch, logging the current dynamic hyperparameters values, summaries and weights to
         tensorboard.
@@ -477,7 +480,7 @@ class TensorboardLoggingCallback(LoggingCallback):
                       `Model`'s metrics are returned. Example : `{'loss': 0.2, 'acc': 0.7}`.
         """
         # Update the dynamic hyperparameters
-        super(TensorboardLoggingCallback, self).on_epoch_end(epoch=epoch)
+        super().on_epoch_end(epoch=epoch)
 
         # Log the weights statistics:
         self._logger.log_weights_statistics()
@@ -504,7 +507,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         # Make sure all values were written to the directory logs:
         self._logger.flush()
 
-    def on_train_batch_end(self, batch: int, logs: dict = None):
+    def on_train_batch_end(self, batch: int, logs: Optional[dict] = None):
         """
         Called at the end of a training batch in `fit` methods. The batch metrics results will be logged. If it is the
         first batch to end, the model architecture and hyperparameters will be logged as well. Note that if the
@@ -515,9 +518,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         :param logs:  Aggregated metric results up until this batch.
         """
         # Log the batch's results:
-        super(TensorboardLoggingCallback, self).on_train_batch_end(
-            batch=batch, logs=logs
-        )
+        super().on_train_batch_end(batch=batch, logs=logs)
 
         # Write the batch loss and metrics results to their graphs:
         self._logger.write_training_results()
@@ -528,7 +529,7 @@ class TensorboardLoggingCallback(LoggingCallback):
             self._logged_hyperparameters = True
             self._logger.write_dynamic_hyperparameters()
 
-    def on_test_batch_end(self, batch: int, logs: dict = None):
+    def on_test_batch_end(self, batch: int, logs: Optional[dict] = None):
         """
         Called at the end of a batch in `evaluate` methods. Also called at the end of a validation batch in the `fit`
         methods, if validation data is provided. The batch metrics results will be logged. In case it is an evaluation
@@ -540,9 +541,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         :param logs:  Aggregated metric results up until this batch.
         """
         # Log the batch's results:
-        super(TensorboardLoggingCallback, self).on_test_batch_end(
-            batch=batch, logs=logs
-        )
+        super().on_test_batch_end(batch=batch, logs=logs)
 
         # Write the batch loss and metrics results to their graphs:
         self._logger.write_validation_results()
@@ -554,9 +553,9 @@ class TensorboardLoggingCallback(LoggingCallback):
             self._logger.write_dynamic_hyperparameters()
 
     @staticmethod
-    def get_default_weight_statistics_list() -> List[
-        Callable[[Union[Variable, Tensor]], Union[float, Tensor]]
-    ]:
+    def get_default_weight_statistics_list() -> (
+        list[Callable[[Union[Variable, Tensor]], Union[float, Tensor]]]
+    ):
         """
         Get the default list of statistics functions being applied on the tracked weights each epoch.
 
@@ -569,7 +568,7 @@ class TensorboardLoggingCallback(LoggingCallback):
         After the trainer / evaluator run begins, this method will be called to setup the results, hyperparameters
         and weights dictionaries for logging.
         """
-        super(TensorboardLoggingCallback, self)._setup_run()
+        super()._setup_run()
 
         # Check if needed to track weights:
         if self._tracked_weights is False:

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,30 +13,36 @@
 # limitations under the License.
 
 import enum
-import typing
 
-from .base import NotificationBase
-from .console import ConsoleNotification
-from .git import GitNotification
-from .ipython import IPythonNotification
-from .slack import SlackNotification
+import mlrun.common.schemas.notification as notifications
+import mlrun.utils.notifications.notification.base as base
+import mlrun.utils.notifications.notification.console as console
+import mlrun.utils.notifications.notification.git as git
+import mlrun.utils.notifications.notification.ipython as ipython
+import mlrun.utils.notifications.notification.mail as mail
+import mlrun.utils.notifications.notification.slack as slack
+import mlrun.utils.notifications.notification.webhook as webhook
 
 
 class NotificationTypes(str, enum.Enum):
-    console = "console"
-    git = "git"
-    ipython = "ipython"
-    slack = "slack"
+    console = notifications.NotificationKind.console.value
+    git = notifications.NotificationKind.git.value
+    ipython = notifications.NotificationKind.ipython.value
+    slack = notifications.NotificationKind.slack.value
+    mail = notifications.NotificationKind.mail.value
+    webhook = notifications.NotificationKind.webhook.value
 
-    def get_notification(self) -> typing.Type[NotificationBase]:
+    def get_notification(self) -> type[base.NotificationBase]:
         return {
-            self.console: ConsoleNotification,
-            self.git: GitNotification,
-            self.ipython: IPythonNotification,
-            self.slack: SlackNotification,
+            self.console: console.ConsoleNotification,
+            self.git: git.GitNotification,
+            self.ipython: ipython.IPythonNotification,
+            self.slack: slack.SlackNotification,
+            self.mail: mail.MailNotification,
+            self.webhook: webhook.WebhookNotification,
         }.get(self)
 
-    def inverse_dependencies(self) -> typing.List[str]:
+    def inverse_dependencies(self) -> list[str]:
         """
         Some notifications should only run if another notification type didn't run.
         Per given notification type, return a list of notification types that should not run in order for this
@@ -47,12 +53,19 @@ class NotificationTypes(str, enum.Enum):
         }.get(self, [])
 
     @classmethod
-    def all(cls) -> typing.List[str]:
-        return list(
-            [
-                cls.console,
-                cls.git,
-                cls.ipython,
-                cls.slack,
-            ]
-        )
+    def local(cls) -> list[str]:
+        return [
+            cls.console,
+            cls.ipython,
+        ]
+
+    @classmethod
+    def all(cls) -> list[str]:
+        return [
+            cls.console,
+            cls.git,
+            cls.ipython,
+            cls.slack,
+            cls.mail,
+            cls.webhook,
+        ]

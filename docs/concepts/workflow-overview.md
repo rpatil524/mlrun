@@ -1,20 +1,7 @@
 (workflow-overview)=
 # Running a multi-stage workflow
 
-A workflow is a definition of execution of functions. It defines the order of execution of multiple dependent steps in a 
-directed acyclic graph (DAG). A workflow 
-can reference the project’s params, secrets, artifacts, etc. It can also use a function execution output as a function execution 
-input (which, of course, defines the order of execution).
 
-MLRun supports running workflows on a `local` or [`kubeflow`](https://www.kubeflow.org/docs/components/pipelines/overview/pipelines-overview/) pipeline engine. The `local` engine runs the workflow as a 
-local process, which is simpler for debugging and running simple/sequential tasks. The `kubeflow` ("kfp") engine runs as a task over the 
-cluster and supports more advanced operations (conditions, branches, etc.). You can select the engine at runtime. Kubeflow-specific
-directives like conditions and branches are not supported by the `local` engine.
-
-Workflows are saved/registered in the project using the {py:meth}`~mlrun.projects.MlrunProject.set_workflow`.  
-Workflows are executed using the {py:meth}`~mlrun.projects.MlrunProject.run` method or using the CLI command `mlrun project`.
-
-Refer to the **{ref}`tutorial`** for complete examples.
 
 **In this section**
 * [Composing workflows](#composing-workflows)
@@ -61,7 +48,11 @@ def newpipe():
     train = mlrun.run_function(
         "train",
         name="train",
-        params={"sample": -1, "label_column": project.get_param("label", "label"), "test_size": 0.10},
+        params={
+            "sample": -1,
+            "label_column": project.get_param("label", "label"),
+            "test_size": 0.10,
+        },
         hyperparams={
             "model_pkg_class": [
                 "sklearn.ensemble.RandomForestClassifier",
@@ -149,7 +140,8 @@ completion and prints out the workflow progress. Alternatively, you can use `.wa
 The default workflow engine is `kfp`. You can override it by specifying the `engine` in the `run()` or `set_workflow()` methods. 
 Using the `local` engine executes the workflow state machine locally (its functions still run as cluster jobs).
 If you set the `local` flag to True, the workflow uses the `local` engine AND the functions run as local process.
-This mode is used for local debugging of workflows.
+This mode is used for local debugging of workflows. The `remote` engine runs the workflow from a remote pod. From the project 
+source you can set the remote engine to run in local by setting engine to `remote:local`.
 
 When running workflows from a git enabled context it first verifies that there are no uncommitted git changes 
 (to guarantee that workflows that load from git do not use old code versions). You can suppress that check by setting the `dirty` flag to True.

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
+from dependency_injector import containers, providers
 
-from .v1 import MpiRuntimeV1, MpiV1RuntimeHandler
-from .v1alpha1 import MpiRuntimeV1Alpha1, MpiV1Alpha1RuntimeHandler
+from mlrun.config import config
+
+from .. import MPIJobCRDVersions
+from .abstract import AbstractMPIJobRuntime
+from .v1 import MpiRuntimeV1
+
+
+def _resolve_mpijob_crd_version():
+    # config is expected to get enriched from the API through the client-spec
+    return config.mpijob_crd_version or MPIJobCRDVersions.default()

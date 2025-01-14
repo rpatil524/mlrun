@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import datetime
 import http
 import json
 
 import pytest
 
 import mlrun
-import mlrun.api.schemas
+import mlrun.common.helpers
+import mlrun.common.schemas
 import tests.integration.sdk_api.base
 from tests.conftest import examples_path
 
@@ -47,13 +49,14 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
         projects = ["run-project-1", "run-project-2", "run-project-3"]
         run_names = ["run-name-1", "run-name-2", "run-name-3"]
         suffixes = ["first", "second", "third"]
+        iterations = 3
         for project in projects:
             project_obj = mlrun.new_project(project)
             project_obj.save()
             for name in run_names:
                 for suffix in suffixes:
                     uid = f"{name}-uid-{suffix}"
-                    for iteration in range(3):
+                    for iteration in range(iterations):
                         run = {
                             "metadata": {
                                 "name": name,
@@ -65,21 +68,45 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
                         mlrun.get_run_db().store_run(run, uid, project, iteration)
 
         # basic list, all projects, all iterations so 3 projects * 3 names * 3 uids * 3 iterations = 81
-        runs = _list_and_assert_objects(81, project="*", iter=True)
+        _list_and_assert_objects(
+            expected_number_of_runs=len(projects)
+            * len(run_names)
+            * len(suffixes)
+            * iterations,
+            project="*",
+            iter=True,
+        )
 
         # basic list, specific project, all iterations, so 3 names * 3 uids * 3 iterations = 27
-        runs = _list_and_assert_objects(27, project=projects[0], iter=True)
+        _list_and_assert_objects(
+            expected_number_of_runs=len(run_names) * len(suffixes) * iterations,
+            project=projects[0],
+            iter=True,
+        )
+
+        # basic list, specific project, only iteration 0, so 3 names = 3
+        _list_and_assert_objects(
+            expected_number_of_runs=len(run_names),
+            project=projects[0],
+            iter=False,
+        )
 
         # basic list, specific project, only iteration 0, so 3 names * 3 uids = 9
-        runs = _list_and_assert_objects(9, project=projects[0], iter=False)
+        # using start time from to make sure we get all runs (and not just latest)
+        _list_and_assert_objects(
+            expected_number_of_runs=len(run_names) * len(suffixes),
+            start_time_from=datetime.datetime.now() - datetime.timedelta(days=1),
+            project=projects[0],
+            iter=False,
+        )
 
         # partitioned list, specific project, 1 row per partition by default, so 3 names * 1 row = 3
         runs = _list_and_assert_objects(
-            3,
+            expected_number_of_runs=len(run_names),
             project=projects[0],
-            partition_by=mlrun.api.schemas.RunPartitionByField.name,
-            partition_sort_by=mlrun.api.schemas.SortField.created,
-            partition_order=mlrun.api.schemas.OrderType.asc,
+            partition_by=mlrun.common.schemas.RunPartitionByField.name,
+            partition_sort_by=mlrun.common.schemas.SortField.created,
+            partition_order=mlrun.common.schemas.OrderType.asc,
         )
         # sorted by ascending created so only the first ones created
         for run in runs:
@@ -87,47 +114,48 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
 
         # partitioned list, specific project, 1 row per partition by default, so 3 names * 1 row = 3
         runs = _list_and_assert_objects(
-            3,
+            expected_number_of_runs=len(run_names),
             project=projects[0],
-            partition_by=mlrun.api.schemas.RunPartitionByField.name,
-            partition_sort_by=mlrun.api.schemas.SortField.updated,
-            partition_order=mlrun.api.schemas.OrderType.desc,
+            partition_by=mlrun.common.schemas.RunPartitionByField.name,
+            partition_sort_by=mlrun.common.schemas.SortField.updated,
+            partition_order=mlrun.common.schemas.OrderType.desc,
         )
         # sorted by descending updated so only the third ones created
         for run in runs:
             assert "third" in run["metadata"]["uid"]
 
         # partitioned list, specific project, 5 row per partition, so 3 names * 5 row = 15
-        runs = _list_and_assert_objects(
-            15,
+        rows_per_partition = 5
+        _list_and_assert_objects(
+            expected_number_of_runs=len(run_names) * rows_per_partition,
             project=projects[0],
-            partition_by=mlrun.api.schemas.RunPartitionByField.name,
-            partition_sort_by=mlrun.api.schemas.SortField.updated,
-            partition_order=mlrun.api.schemas.OrderType.desc,
-            rows_per_partition=5,
+            partition_by=mlrun.common.schemas.RunPartitionByField.name,
+            partition_sort_by=mlrun.common.schemas.SortField.updated,
+            partition_order=mlrun.common.schemas.OrderType.desc,
+            rows_per_partition=rows_per_partition,
             iter=True,
         )
 
         # partitioned list, specific project, 5 rows per partition, max of 2 partitions, so 2 names * 5 rows = 10
-        runs = _list_and_assert_objects(
-            10,
+        _list_and_assert_objects(
+            expected_number_of_runs=10,
             project=projects[0],
-            partition_by=mlrun.api.schemas.RunPartitionByField.name,
-            partition_sort_by=mlrun.api.schemas.SortField.updated,
-            partition_order=mlrun.api.schemas.OrderType.desc,
-            rows_per_partition=5,
+            partition_by=mlrun.common.schemas.RunPartitionByField.name,
+            partition_sort_by=mlrun.common.schemas.SortField.updated,
+            partition_order=mlrun.common.schemas.OrderType.desc,
+            rows_per_partition=rows_per_partition,
             max_partitions=2,
             iter=True,
         )
 
         # partitioned list, specific project, 4 rows per partition, max of 2 partitions, but only iter=0 so each
         # partition has 3 rows, so 2 * 3 = 6
-        runs = _list_and_assert_objects(
-            6,
+        _list_and_assert_objects(
+            expected_number_of_runs=6,
             project=projects[0],
-            partition_by=mlrun.api.schemas.RunPartitionByField.name,
-            partition_sort_by=mlrun.api.schemas.SortField.updated,
-            partition_order=mlrun.api.schemas.OrderType.desc,
+            partition_by=mlrun.common.schemas.RunPartitionByField.name,
+            partition_sort_by=mlrun.common.schemas.SortField.updated,
+            partition_order=mlrun.common.schemas.OrderType.desc,
             rows_per_partition=4,
             max_partitions=2,
             iter=False,
@@ -136,17 +164,17 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
         # Some negative testing - no sort by field
         with pytest.raises(mlrun.errors.MLRunBadRequestError):
             _list_and_assert_objects(
-                0,
+                expected_number_of_runs=0,
                 project=projects[0],
-                partition_by=mlrun.api.schemas.RunPartitionByField.name,
+                partition_by=mlrun.common.schemas.RunPartitionByField.name,
             )
         # An invalid partition-by field - will be failed by fastapi due to schema validation.
         with pytest.raises(mlrun.errors.MLRunHTTPError) as excinfo:
             _list_and_assert_objects(
-                0,
+                expected_number_of_runs=0,
                 project=projects[0],
                 partition_by="key",
-                partition_sort_by=mlrun.api.schemas.SortField.updated,
+                partition_sort_by=mlrun.common.schemas.SortField.updated,
             )
         assert (
             excinfo.value.response.status_code
@@ -155,7 +183,7 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
 
         # expecting 3 since we're getting back all iterations for that uid
         _list_and_assert_objects(
-            3,
+            expected_number_of_runs=3,
             project=projects[0],
             uid=f"{run_names[0]}-uid-{suffixes[0]}",
             iter=True,
@@ -163,7 +191,7 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
 
         uid_list = [f"{run_names[0]}-uid-{suffix}" for suffix in suffixes]
         runs = _list_and_assert_objects(
-            len(uid_list),
+            expected_number_of_runs=len(uid_list),
             project=projects[0],
             uid=uid_list,
             iter=False,
@@ -179,10 +207,10 @@ class TestRuns(tests.integration.sdk_api.base.TestMLRunIntegration):
         assert fn.kind == "job", "kind not set, test failed"
         assert fn.spec.build.functionSourceCode, "code not embedded"
         assert fn.spec.build.origin_filename == filename, "did not record filename"
-        assert type(fn.metadata.labels) == dict, "metadata labels were not set"
+        assert isinstance(fn.metadata.labels, dict), "metadata labels were not set"
         run = fn.run(workdir=str(examples_path), local=True)
 
-        project, uri, tag, hash_key = mlrun.utils.parse_versioned_object_uri(
+        project, uri, tag, hash_key = mlrun.common.helpers.parse_versioned_object_uri(
             run.spec.function
         )
         local_fn = mlrun.get_run_db().get_function(

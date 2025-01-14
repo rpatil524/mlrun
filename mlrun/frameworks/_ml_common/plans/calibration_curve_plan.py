@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Dict
 
 import plotly.graph_objects as go
 from sklearn.calibration import calibration_curve
@@ -33,7 +32,6 @@ class CalibrationCurvePlan(MLPlotPlan):
 
     def __init__(
         self,
-        normalize: bool = False,
         n_bins: int = 5,
         strategy: str = "uniform",
     ):
@@ -43,19 +41,16 @@ class CalibrationCurvePlan(MLPlotPlan):
         To read more about the parameters, head to the SciKit-Learn docs at:
         https://scikit-learn.org/stable/modules/generated/sklearn.calibration.calibration_curve.html
 
-        :param normalize: Whether the probabilities needs to be normalized into the [0, 1] interval, i.e. is not a
-                          proper probability.
         :param n_bins:    Number of bins to discretize the [0, 1] interval.
         :param strategy:  Strategy used to define the widths of the bins. Can be on of {‘uniform’, ‘quantile’}.
                           Default: "uniform".
         """
         # Store the parameters:
-        self._normalize = normalize
         self._n_bins = n_bins
         self._strategy = strategy
 
         # Continue the initialization for the MLPlan:
-        super(CalibrationCurvePlan, self).__init__(need_probabilities=True)
+        super().__init__(need_probabilities=True)
 
     def is_ready(self, stage: MLPlanStages, is_probabilities: bool) -> bool:
         """
@@ -76,8 +71,8 @@ class CalibrationCurvePlan(MLPlotPlan):
         y_pred: MLTypes.DatasetType = None,
         model: MLTypes.ModelType = None,
         x: MLTypes.DatasetType = None,
-        **kwargs
-    ) -> Dict[str, Artifact]:
+        **kwargs,
+    ) -> dict[str, Artifact]:
         """
         Produce the calibration curve according to the ground truth (y) and predictions (y_pred) values. If predictions
         are not available, the model and a dataset can be given to produce them.
@@ -94,7 +89,6 @@ class CalibrationCurvePlan(MLPlotPlan):
             y,
             y_pred[:, -1],  # Take only the second class probabilities (1, not 0).
             n_bins=self._n_bins,
-            normalize=self._normalize,
             strategy=self._strategy,
         )
 

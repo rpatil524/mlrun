@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,9 @@
 # limitations under the License.
 #
 import copy
+import pathlib
 
+import pytest
 from deepdiff import DeepDiff
 
 import mlrun
@@ -25,8 +27,6 @@ def _get_runtime():
         "metadata": {
             "name": "spark-submit",
             "project": "default",
-            "categories": [],
-            "tag": "",
             "hash": "7b3064c6b334535a5d949ebe9cfc61a094f98c78",
             "updated": "2020-10-21T22:40:35.042132+00:00",
             "credentials": {"access_key": "some-access-key"},
@@ -40,17 +40,13 @@ def _get_runtime():
             ],
             "image": "iguazio/shell:3.0_b5533_20201020062229",
             "mode": "pass",
-            "volumes": [],
-            "volume_mounts": [],
-            "env": [],
             "description": "",
-            "build": {"commands": []},
             "affinity": None,
             "disable_auto_mount": False,
             "priority_class_name": "",
             "tolerations": None,
-            "security_context": None,
-            "clone_target_dir": "",
+            "node_selector": "",
+            "state_thresholds": mlrun.mlconf.function.spec.state_thresholds.default.to_dict(),
         },
         "verbose": False,
     }
@@ -61,9 +57,9 @@ def test_new_function_from_runtime():
     runtime = _get_runtime()
     function = mlrun.new_function(runtime=runtime)
     expected_runtime = runtime
-    expected_runtime["spec"][
-        "preemption_mode"
-    ] = mlrun.mlconf.function_defaults.preemption_mode
+    expected_runtime["spec"]["preemption_mode"] = (
+        mlrun.mlconf.function_defaults.preemption_mode
+    )
     assert (
         DeepDiff(
             function.to_dict(),
@@ -79,9 +75,9 @@ def test_new_function_args_without_command():
     runtime["spec"]["command"] = ""
     function = mlrun.new_function(runtime=runtime)
     expected_runtime = runtime
-    expected_runtime["spec"][
-        "preemption_mode"
-    ] = mlrun.mlconf.function_defaults.preemption_mode
+    expected_runtime["spec"]["preemption_mode"] = (
+        mlrun.mlconf.function_defaults.preemption_mode
+    )
     assert (
         DeepDiff(
             function.to_dict(),
@@ -134,9 +130,9 @@ def test_new_function_with_resources():
     ]:
         expected_runtime = copy.deepcopy(runtime)
         expected_runtime["spec"]["resources"] = test_case.get("expected_resources")
-        expected_runtime["spec"][
-            "preemption_mode"
-        ] = mlrun.mlconf.function_defaults.preemption_mode
+        expected_runtime["spec"]["preemption_mode"] = (
+            mlrun.mlconf.function_defaults.preemption_mode
+        )
         runtime["spec"]["resources"] = test_case.get("resources", None)
         mlrun.mlconf.default_function_pod_resources = test_case.get("default_resources")
         function = mlrun.new_function(runtime=runtime)
@@ -270,12 +266,12 @@ def test_new_function_args_with_default_image_pull_secret():
     runtime = _get_runtime()
     function = mlrun.new_function(runtime=runtime)
     expected_runtime = runtime
-    expected_runtime["spec"][
-        "image_pull_secret"
-    ] = mlrun.mlconf.function.spec.image_pull_secret.default
-    expected_runtime["spec"][
-        "preemption_mode"
-    ] = mlrun.mlconf.function_defaults.preemption_mode
+    expected_runtime["spec"]["image_pull_secret"] = (
+        mlrun.mlconf.function.spec.image_pull_secret.default
+    )
+    expected_runtime["spec"]["preemption_mode"] = (
+        mlrun.mlconf.function_defaults.preemption_mode
+    )
     assert (
         DeepDiff(
             function.to_dict(),
@@ -294,9 +290,9 @@ def test_new_function_override_default_image_pull_secret():
     function = mlrun.new_function(runtime=runtime)
     expected_runtime = runtime
     expected_runtime["spec"]["image_pull_secret"] = new_secret
-    expected_runtime["spec"][
-        "preemption_mode"
-    ] = mlrun.mlconf.function_defaults.preemption_mode
+    expected_runtime["spec"]["preemption_mode"] = (
+        mlrun.mlconf.function_defaults.preemption_mode
+    )
     assert (
         DeepDiff(
             function.to_dict(),
@@ -312,3 +308,22 @@ def test_new_function_invalid_characters():
     invalid_function_name = "invalid_name with_spaces"
     function = mlrun.new_function(name=invalid_function_name, runtime=runtime)
     assert function.metadata.name == "invalid-name-with-spaces"
+
+
+def test_set_envs():
+    assets_path = pathlib.Path(__file__).parent.parent / "assets"
+    env_path = str(assets_path / "envfile")
+    runtime = _get_runtime()
+    function = mlrun.new_function(runtime=runtime)
+    function.set_envs(file_path=env_path)
+    assert function.get_env("ENV_ARG1") == "123"
+    assert function.get_env("ENV_ARG2") == "abc"
+
+
+def test_set_envs_file_not_find():
+    runtime = _get_runtime()
+    function = mlrun.new_function(runtime=runtime)
+    file_name = ".env-test"
+    with pytest.raises(mlrun.errors.MLRunNotFoundError) as excinfo:
+        function.set_envs(file_path=file_name)
+    assert f"{file_name} does not exist" in str(excinfo.value)

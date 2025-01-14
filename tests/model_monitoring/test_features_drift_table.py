@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,32 +11,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-import json
-import os
-import tempfile
-from typing import Tuple
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import Mock, PropertyMock, patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import mlrun
-from mlrun.artifacts import Artifact
-from mlrun.data_types.infer import DFDataInfer
-from mlrun.model_monitoring.features_drift_table import FeaturesDriftTablePlot
-from mlrun.model_monitoring.model_monitoring_batch import (
-    VirtualDrift,
-    calculate_inputs_statistics,
-)
+import mlrun.model_monitoring.applications.context as mm_context
+import mlrun.model_monitoring.applications.histogram_data_drift as histogram_data_drift
+import mlrun.serving
+from mlrun.common.model_monitoring.helpers import FeatureStats, pad_features_hist
+from mlrun.data_types.infer import DFDataInfer, InferOptions, default_num_bins
+from mlrun.model_monitoring.helpers import calculate_inputs_statistics
+
+
+@contextmanager
+def mocked_graph_context_project() -> Iterator[None]:
+    with patch("mlrun.serving.GraphContext.project", PropertyMock) as project_mock:
+        project_mock.return_value = "proj-0"
+        yield
 
 
 def generate_data(
     n_samples: int,
     n_features: int,
-    loc_range: Tuple[int, int] = (0.1, 1.1),
-    scale_range: Tuple[int, int] = (1, 2),
-    inputs_diff_range: Tuple[int, int] = (0, 1),
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    loc_range: tuple[float, float] = (0.1, 1.1),
+    scale_range: tuple[int, int] = (1, 2),
+    inputs_diff_range: tuple[int, int] = (0, 1),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Generate data:
     data = {}
     for i in range(n_features):
@@ -66,62 +73,94 @@ def plot_produce(context: mlrun.MLClientCtx):
     )
 
     # Calculate statistics:
-    sample_data_statistics = DFDataInfer.get_stats(
-        df=sample_data,
-        options=mlrun.data_types.infer.InferOptions.Histogram,
+    sample_data_statistics = FeatureStats(
+        DFDataInfer.get_stats(df=sample_data, options=InferOptions.Histogram)
     )
-    inputs_statistics = calculate_inputs_statistics(
-        sample_set_statistics=sample_data_statistics,
-        inputs=inputs,
+    pad_features_hist(sample_data_statistics)
+    inputs_statistics = FeatureStats(
+        calculate_inputs_statistics(
+            sample_set_statistics=sample_data_statistics,
+            inputs=inputs,
+        )
+    )
+    with patch(
+        "mlrun.get_current_project",
+        Mock(return_value=Mock(spec=mlrun.projects.project.MlrunProject)),
+    ):
+        with mocked_graph_context_project():
+            monitoring_context = mm_context.MonitoringApplicationContext._from_ml_ctx(
+                application_name="histogram-data-drift",
+                event={},
+                context=context,
+            )
+            monitoring_context._feature_stats = inputs_statistics
+            monitoring_context._sample_df_stats = sample_data_statistics
+    # Initialize the app
+    application = histogram_data_drift.HistogramDataDriftApplication()
+    # Calculate drift
+    metrics_per_feature = application._compute_metrics_per_feature(
+        monitoring_context=monitoring_context,
+    )
+    application._log_drift_artifacts(
+        monitoring_context=monitoring_context,
+        metrics_per_feature=metrics_per_feature,
+        log_json_artifact=False,
     )
 
-    # Calculate drift:
-    virtual_drift = VirtualDrift(inf_capping=10)
-    metrics = virtual_drift.compute_drift_from_histograms(
-        feature_stats=sample_data_statistics,
-        current_stats=inputs_statistics,
-    )
-    drift_results = virtual_drift.check_for_drift_per_feature(
-        metrics_results_dictionary=metrics
-    )
 
-    # Plot:
-    html_plot = FeaturesDriftTablePlot().produce(
-        features=list(sample_data.columns),
-        sample_set_statistics=sample_data_statistics,
-        inputs_statistics=inputs_statistics,
-        metrics=metrics,
-        drift_results=drift_results,
-    )
-
-    # Log:
-    context.log_artifact(
-        Artifact(body=html_plot, format="html", key="drift_table_plot")
-    )
-
-
-def test_plot_produce():
-    # Create a temp directory:
-    output_path = tempfile.TemporaryDirectory()
-
+def test_plot_produce(rundb_mock, tmp_path: Path) -> None:
     # Run the plot production and logging:
-    train_run = mlrun.new_function().run(
-        artifact_path=output_path.name,
-        handler=plot_produce,
+    app_plot_run = mlrun.new_function().run(
+        artifact_path=str(tmp_path), handler=plot_produce
     )
-
-    # Print the outputs for manual validation:
-    print(json.dumps(train_run.outputs, indent=4))
 
     # Validate the artifact was logged:
-    assert len(train_run.status.artifacts) == 1
+    assert len(app_plot_run.status.artifacts) == 1
 
     # Check the plot was saved properly (only the drift table plot should appear):
-    artifact_directory_content = os.listdir(
-        os.path.dirname(train_run.outputs["drift_table_plot"])
+    artifact_directory_content = list(
+        Path(app_plot_run.status.artifacts[0]["spec"]["target_path"]).parent.glob("*")
     )
     assert len(artifact_directory_content) == 1
-    assert artifact_directory_content[0] == "drift_table_plot.html"
+    assert artifact_directory_content[0].name == "drift_table_plot.html"
 
-    # Clean up the temporary directory:
-    output_path.cleanup()
+
+class TestCalculateInputsStatistics:
+    _HIST = "hist"
+    _DEFAULT_NUM_BINS = default_num_bins
+    _SHARED_FEATURE = "shared_feature"
+
+    @classmethod
+    @pytest.fixture
+    def sample_set_statistics(cls) -> dict:
+        return {
+            cls._SHARED_FEATURE: {
+                cls._HIST: [
+                    [0, *list(np.random.randint(10, size=cls._DEFAULT_NUM_BINS)), 0],
+                    [
+                        -10e20,
+                        *list(np.linspace(0, 1, cls._DEFAULT_NUM_BINS + 1)),
+                        10e20,
+                    ],
+                ]
+            }
+        }
+
+    @classmethod
+    @pytest.fixture
+    def inputs_df(cls) -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=[cls._SHARED_FEATURE, "feature_1"],
+            data=np.random.randint(-15, 20, size=(9, 2)),
+        )
+
+    @classmethod
+    def test_histograms_features(
+        cls, sample_set_statistics: dict, inputs_df: pd.DataFrame
+    ) -> None:
+        current_stats = calculate_inputs_statistics(
+            sample_set_statistics=sample_set_statistics, inputs=inputs_df
+        )
+        assert (
+            current_stats.keys() == sample_set_statistics.keys()
+        ), "Inputs statistics and the current statistics should have the same features"

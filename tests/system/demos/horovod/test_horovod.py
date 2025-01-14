@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ import pathlib
 import pytest
 
 import mlrun
+import mlrun.runtimes.mounts
 from tests.system.base import TestMLRunSystem
 from tests.system.demos.base import TestDemo
 
@@ -26,7 +27,6 @@ from tests.system.demos.base import TestDemo
 @TestMLRunSystem.skip_test_if_env_not_configured
 @pytest.mark.enterprise
 class TestHorovodTFv2(TestDemo):
-
     project_name = "horovod-project"
 
     def create_demo_project(self) -> mlrun.projects.MlrunProject:
@@ -35,13 +35,13 @@ class TestHorovodTFv2(TestDemo):
             self.project_name, str(self.assets_path), init_git=True
         )
 
-        mlrun.mount_v3io()
+        mlrun.runtimes.mounts.mount_v3io()
 
         self._logger.debug("Uploading training file")
         trainer_src_path = str(self.assets_path / "horovod_training.py")
         trainer_dest_path = pathlib.Path("/assets/horovod_training.py")
         stores = mlrun.datastore.store_manager.set()
-        datastore, subpath = stores.get_or_create_store(
+        datastore, subpath, _ = stores.get_or_create_store(
             self._get_v3io_user_store_path(trainer_dest_path)
         )
         datastore.upload(subpath, trainer_src_path)
@@ -66,14 +66,14 @@ class TestHorovodTFv2(TestDemo):
             name="trainer",
             kind="mpijob",
             command=self._get_v3io_user_store_path(trainer_dest_path, remote=False),
-            image="mlrun/ml-models",
+            image="mlrun/mlrun",
         )
         trainer.spec.remote = True
         trainer.spec.replicas = 4
         trainer.spec.service_type = "NodePort"
 
         demo_project.set_function(trainer)
-        demo_project.set_function("hub://tf2_serving", "serving")
+        demo_project.set_function("hub://tf2-serving", "serving")
 
         demo_project.log_artifact(
             "images",

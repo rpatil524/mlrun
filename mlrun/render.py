@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pathlib
+import typing
 import uuid
 from os import environ, path
 
 import pandas as pd
 
+import mlrun.utils
+
 from .config import config
 from .datastore import uri_to_ipython
-from .utils import dict_to_list, get_in, is_ipython
+from .utils import dict_to_list, get_in, is_jupyter
 
 JUPYTER_SERVER_ROOT = environ.get("HOME", "/User")
 supported_viewers = [
@@ -72,7 +75,13 @@ def dict_html(x):
     return "".join([f'<div class="dictlist">{i}</div>' for i in dict_to_list(x)])
 
 
-def link_to_ipython(link):
+def link_to_ipython(link: str):
+    """
+    Convert a link (e.g. v3io path) to a jupyter notebook local link.
+
+    :param link: the link to convert
+    :return:     the converted link and ref for expanding the file in the notebook
+    """
     valid = pathlib.Path(link).suffix in supported_viewers
     ref = 'class="artifact" onclick="expandPanel(this)" paneName="result" '
     if "://" not in link:
@@ -95,22 +104,34 @@ def link_html(text, link=""):
     return f'<div {ref}title="{link}">{text}</div>'
 
 
-def artifacts_html(x, pathcol="path"):
-    if not x:
+def artifacts_html(
+    artifacts: list[dict],
+    attribute_name: str = "path",
+):
+    """
+    Generate HTML for a list of artifacts. The HTML will be a list of links to the artifacts to be presented in the
+    jupyter notebook. The links will be clickable and will open the artifact in a new tab.
+
+    :param artifacts:       contains a list of artifact dictionaries
+    :param attribute_name:  the attribute of the artifact to use as the link text
+    :return:                the generated HTML
+    """
+    if not artifacts:
         return ""
     html = ""
-    for i in x:
-        # support legacy format
-        if pathcol in i:
-            link, ref = link_to_ipython(i[pathcol])
-        else:
-            link, ref = link_to_ipython(i["spec"][pathcol])
 
-        if "key" in i:
-            key = i["key"]
-        else:
-            key = i["metadata"]["key"]
+    for artifact in artifacts:
+        attribute_value = artifact["spec"].get(attribute_name)
+        key = artifact["metadata"]["key"]
 
+        if not attribute_value:
+            mlrun.utils.logger.warning(
+                f"Artifact required attribute {attribute_name} is missing, omitting from output",
+                artifact_key=key,
+            )
+            continue
+
+        link, ref = link_to_ipython(attribute_value)
         html += f'<div {ref}title="{link}">{key}</div>'
     return html
 
@@ -160,8 +181,8 @@ def run_to_html(results, display=True):
 
 
 def ipython_display(html, display=True, alt_text=None):
-    if display and html and is_ipython:
-        import IPython
+    if display and html and is_jupyter:
+        import IPython.display
 
         IPython.display.display(IPython.display.HTML(html))
     elif alt_text:
@@ -262,9 +283,14 @@ function copyToClipboard(fld) {
 }
 function expandPanel(el) {
   const panelName = "#" + el.getAttribute('paneName');
-  console.log(el.title);
 
-  document.querySelector(panelName + "-title").innerHTML = el.title
+  // Get the base URL of the current notebook
+  var baseUrl = window.location.origin;
+
+  // Construct the full URL
+  var fullUrl = new URL(el.title, baseUrl).href;
+
+  document.querySelector(panelName + "-title").innerHTML = fullUrl
   iframe = document.querySelector(panelName + "-body");
 
   const tblcss = `<style> body { font-family: Arial, Helvetica, sans-serif;}
@@ -278,7 +304,7 @@ function expandPanel(el) {
   }
 
   function reqListener () {
-    if (el.title.endsWith(".csv")) {
+    if (fullUrl.endsWith(".csv")) {
       iframe.setAttribute("srcdoc", tblcss + csvToHtmlTable(this.responseText));
     } else {
       iframe.setAttribute("srcdoc", this.responseText);
@@ -288,11 +314,11 @@ function expandPanel(el) {
 
   const oReq = new XMLHttpRequest();
   oReq.addEventListener("load", reqListener);
-  oReq.open("GET", el.title);
+  oReq.open("GET", fullUrl);
   oReq.send();
 
 
-  //iframe.src = el.title;
+  //iframe.src = fullUrl;
   const resultPane = document.querySelector(panelName + "-pane");
   if (resultPane.classList.contains("hidden")) {
     resultPane.classList.remove("hidden");
@@ -338,7 +364,12 @@ def get_tblframe(df, display, classes=None):
 uid_template = '<div title="{}"><a href="{}/{}/{}/jobs/monitor/{}/overview" target="_blank" >...{}</a></div>'
 
 
-def runs_to_html(df, display=True, classes=None, short=False):
+def runs_to_html(
+    df: pd.DataFrame,
+    display: bool = True,
+    classes: typing.Optional[typing.Union[str, list, tuple]] = None,
+    short: bool = False,
+):
     def time_str(x):
         try:
             return x.strftime("%b %d %H:%M:%S")
@@ -370,21 +401,26 @@ def runs_to_html(df, display=True, classes=None, short=False):
         df.drop("labels", axis=1, inplace=True)
         df.drop("inputs", axis=1, inplace=True)
         df.drop("artifacts", axis=1, inplace=True)
+        df.drop("artifact_uris", axis=1, inplace=True)
     else:
         df["labels"] = df["labels"].apply(dict_html)
         df["inputs"] = df["inputs"].apply(inputs_html)
-        df["artifacts"] = df["artifacts"].apply(
-            lambda x: artifacts_html(x, "target_path")
-        )
+        if df["artifacts"][0]:
+            df["artifacts"] = df["artifacts"].apply(
+                lambda artifacts: artifacts_html(artifacts, "target_path"),
+            )
+            df.drop("artifact_uris", axis=1, inplace=True)
+        elif df["artifact_uris"][0]:
+            df["artifact_uris"] = df["artifact_uris"].apply(dict_html)
+            df.drop("artifacts", axis=1, inplace=True)
+        else:
+            df.drop("artifacts", axis=1, inplace=True)
+            df.drop("artifact_uris", axis=1, inplace=True)
 
     def expand_error(x):
         if x["state"] == "error":
             title = str(x["error"])
-            state = f'<div style="color: red;" title="{title}">'
-
-            # TODO: is this replacement needed?
-            state.replace('"', "'")
-            state += f'{x["state"]}</div>'
+            state = f'<div style="color: red;" title="{title}">{x["state"]}</div>'
             x["state"] = state
         return x
 

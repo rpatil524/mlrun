@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,53 +18,77 @@ import asyncio
 import json
 import os
 import socket
-import sys
 import traceback
 import uuid
 from typing import Optional, Union
 
+from nuclio import Context as NuclioContext
+from nuclio.request import Logger as NuclioLogger
+
 import mlrun
+import mlrun.common.constants
+import mlrun.common.helpers
+import mlrun.model_monitoring
+import mlrun.utils
 from mlrun.config import config
 from mlrun.errors import err_to_str
 from mlrun.secrets import SecretsStore
 
+from ..common.helpers import parse_versioned_object_uri
+from ..common.schemas.model_monitoring.constants import FileTargetKind
 from ..datastore import get_stream_pusher
 from ..datastore.store_resources import ResourceCache
 from ..errors import MLRunInvalidArgumentError
 from ..model import ModelObj
-from ..utils import create_logger, get_caller_globals, parse_versioned_object_uri
+from ..utils import get_caller_globals
 from .states import RootFlowStep, RouterStep, get_function, graph_root_setter
 from .utils import event_id_key, event_path_key
 
+DUMMY_STREAM = "dummy://"
+
 
 class _StreamContext:
-    def __init__(self, enabled, parameters, function_uri):
+    """Handles the stream context for the events stream process. Includes the configuration for the output stream
+    that will be used for pushing the events from the nuclio model serving function"""
+
+    def __init__(self, enabled: bool, parameters: dict, function_uri: str):
+        """
+        Initialize _StreamContext object.
+        :param enabled:      A boolean indication for applying the stream context
+        :param parameters:   Dictionary of optional parameters, such as `log_stream` and `stream_args`. Note that these
+                             parameters might be relevant to the output source such as `kafka_brokers` if
+                             the output source is from type Kafka.
+        :param function_uri: Full value of the function uri, usually it's <project-name>/<function-name>
+        """
+
         self.enabled = False
         self.hostname = socket.gethostname()
         self.function_uri = function_uri
         self.output_stream = None
         self.stream_uri = None
+        log_stream = parameters.get(FileTargetKind.LOG_STREAM, "")
 
-        log_stream = parameters.get("log_stream", "")
-        stream_uri = config.model_endpoint_monitoring.store_prefixes.default
-
-        if ((enabled and stream_uri) or log_stream) and function_uri:
+        if (enabled or log_stream) and function_uri:
             self.enabled = True
-
             project, _, _, _ = parse_versioned_object_uri(
                 function_uri, config.default_project
             )
 
-            stream_uri = stream_uri.format(project=project, kind="stream")
-
-            if log_stream:
-                stream_uri = log_stream.format(project=project)
-
             stream_args = parameters.get("stream_args", {})
 
-            self.stream_uri = stream_uri
+            if log_stream == DUMMY_STREAM:
+                # Dummy stream used for testing, see tests/serving/test_serving.py
+                self.stream_uri = DUMMY_STREAM
+            elif not stream_args.get("mock"):  # if not a mock: `context.is_mock = True`
+                self.stream_uri = mlrun.model_monitoring.get_stream_path(
+                    project=project
+                )
 
-            self.output_stream = get_stream_pusher(stream_uri, **stream_args)
+            if log_stream:
+                # Update the stream path to the log stream value
+                self.stream_uri = log_stream.format(project=project)
+
+            self.output_stream = get_stream_pusher(self.stream_uri, **stream_args)
 
 
 class GraphServer(ModelObj):
@@ -85,6 +109,9 @@ class GraphServer(ModelObj):
         tracking_policy=None,
         secret_sources=None,
         default_content_type=None,
+        function_name=None,
+        function_tag=None,
+        project=None,
     ):
         self._graph = None
         self.graph: Union[RouterStep, RootFlowStep] = graph
@@ -107,6 +134,9 @@ class GraphServer(ModelObj):
         self.resource_cache = None
         self.default_content_type = default_content_type
         self.http_trigger = True
+        self.function_name = function_name
+        self.function_tag = function_tag
+        self.project = project
 
     def set_current_function(self, function):
         """set which child function this server is currently running on"""
@@ -138,6 +168,7 @@ class GraphServer(ModelObj):
         resource_cache: ResourceCache = None,
         logger=None,
         is_mock=False,
+        monitoring_mock=False,
     ):
         """for internal use, initialize all steps (recursively)"""
 
@@ -150,6 +181,7 @@ class GraphServer(ModelObj):
 
         context = GraphContext(server=self, nuclio_context=context, logger=logger)
         context.is_mock = is_mock
+        context.monitoring_mock = monitoring_mock
         context.root = self.graph
 
         context.stream = _StreamContext(
@@ -174,16 +206,11 @@ class GraphServer(ModelObj):
 
     def init_object(self, namespace):
         self.graph.init_object(self.context, namespace, self.load_mode, reset=True)
-        return (
-            v2_serving_async_handler
-            if config.datastore.async_source_mode == "enabled"
-            else v2_serving_handler
-        )
 
     def test(
         self,
         path: str = "/",
-        body: Union[str, bytes, dict] = None,
+        body: Optional[Union[str, bytes, dict]] = None,
         method: str = "",
         headers: Optional[str] = None,
         content_type: Optional[str] = None,
@@ -296,17 +323,14 @@ class GraphServer(ModelObj):
 
     def wait_for_completion(self):
         """wait for async operation to complete"""
-        self.graph.wait_for_completion()
+        return self.graph.wait_for_completion()
 
 
 def v2_serving_init(context, namespace=None):
     """hook for nuclio init_context()"""
 
-    data = os.environ.get("SERVING_SPEC_ENV", "")
-    if not data:
-        raise MLRunInvalidArgumentError("failed to find spec env var")
-    spec = json.loads(data)
     context.logger.info("Initializing server from spec")
+    spec = mlrun.utils.get_serving_spec()
     server = GraphServer.from_dict(spec)
     if config.log_level.lower() == "debug":
         server.verbose = True
@@ -314,21 +338,68 @@ def v2_serving_init(context, namespace=None):
         server.http_trigger = getattr(context.trigger, "kind", "http") == "http"
     context.logger.info_with(
         "Setting current function",
-        current_functiton=os.environ.get("SERVING_CURRENT_FUNCTION", ""),
+        current_function=os.getenv("SERVING_CURRENT_FUNCTION", ""),
     )
-    server.set_current_function(os.environ.get("SERVING_CURRENT_FUNCTION", ""))
+    server.set_current_function(os.getenv("SERVING_CURRENT_FUNCTION", ""))
     context.logger.info_with(
         "Initializing states", namespace=namespace or get_caller_globals()
     )
-    server.init_states(context, namespace or get_caller_globals())
+    kwargs = {}
+    if hasattr(context, "is_mock"):
+        kwargs["is_mock"] = context.is_mock
+    server.init_states(
+        context,
+        namespace or get_caller_globals(),
+        **kwargs,
+    )
     context.logger.info("Initializing graph steps")
-    serving_handler = server.init_object(namespace or get_caller_globals())
+    server.init_object(namespace or get_caller_globals())
     # set the handler hook to point to our handler
-    setattr(context, "mlrun_handler", serving_handler)
+    setattr(context, "mlrun_handler", v2_serving_handler)
     setattr(context, "_server", server)
     context.logger.info_with("Serving was initialized", verbose=server.verbose)
     if server.verbose:
         context.logger.info(server.to_yaml())
+
+    _set_callbacks(server, context)
+
+
+def _set_callbacks(server, context):
+    if not server.graph.supports_termination() or not hasattr(context, "platform"):
+        return
+
+    if hasattr(context.platform, "set_termination_callback"):
+        context.logger.info(
+            "Setting termination callback to terminate graph on worker shutdown"
+        )
+
+        async def termination_callback():
+            context.logger.info("Termination callback called")
+            maybe_coroutine = server.wait_for_completion()
+            if asyncio.iscoroutine(maybe_coroutine):
+                await maybe_coroutine
+            context.logger.info("Termination of async flow is completed")
+
+        context.platform.set_termination_callback(termination_callback)
+
+    if hasattr(context.platform, "set_drain_callback"):
+        context.logger.info(
+            "Setting drain callback to terminate and restart the graph on a drain event (such as rebalancing)"
+        )
+
+        async def drain_callback():
+            context.logger.info("Drain callback called")
+            maybe_coroutine = server.wait_for_completion()
+            if asyncio.iscoroutine(maybe_coroutine):
+                await maybe_coroutine
+            context.logger.info(
+                "Termination of async flow is completed. Rerunning async flow."
+            )
+            # Rerun the flow without reconstructing it
+            server.graph._run_async_flow()
+            context.logger.info("Async flow restarted")
+
+        context.platform.set_drain_callback(drain_callback)
 
 
 def v2_serving_handler(context, event, get_body=False):
@@ -337,19 +408,27 @@ def v2_serving_handler(context, event, get_body=False):
         # Workaround for a Nuclio bug where it sometimes passes b'' instead of None due to dirty memory
         if event.body == b"":
             event.body = None
-    else:
-        event.path = "/"  # fix the issue that non http returns "Unsupported"
+
+    # original path is saved in stream_path so it can be used by explicit ack, but path is reset to / as a
+    # workaround for NUC-178
+    # nuclio 1.12.12 added the topic attribute, and we must use it as part of the fix for NUC-233
+    # TODO: Remove fallback on event.path once support for nuclio<1.12.12 is dropped
+    event.stream_path = getattr(event, "topic", event.path)
+    if hasattr(event, "trigger") and event.trigger.kind in (
+        "kafka",
+        "kafka-cluster",
+        "v3ioStream",
+        "v3io-stream",
+        "rabbit-mq",
+        "rabbitMq",
+    ):
+        event.path = "/"
 
     return context._server.run(event, context, get_body)
 
 
-async def v2_serving_async_handler(context, event, get_body=False):
-    """hook for nuclio handler()"""
-    return await context._server.run(event, context, get_body)
-
-
 def create_graph_server(
-    parameters={},
+    parameters=None,
     load_mode=None,
     graph=None,
     verbose=False,
@@ -365,14 +444,15 @@ def create_graph_server(
         server.graph.add_route("my", class_name=MyModelClass, model_path="{path}", z=100)
         print(server.test("/v2/models/my/infer", testdata))
     """
+    parameters = parameters or {}
     server = GraphServer(graph, parameters, load_mode, verbose=verbose, **kwargs)
     server.set_current_function(
-        current_function or os.environ.get("SERVING_CURRENT_FUNCTION", "")
+        current_function or os.getenv("SERVING_CURRENT_FUNCTION", "")
     )
     return server
 
 
-class MockTrigger(object):
+class MockTrigger:
     """mock nuclio event trigger"""
 
     def __init__(self, kind="", name=""):
@@ -380,7 +460,7 @@ class MockTrigger(object):
         self.name = name
 
 
-class MockEvent(object):
+class MockEvent:
     """mock basic nuclio event object"""
 
     def __init__(
@@ -413,7 +493,7 @@ class MockEvent(object):
         return f"Event(id={self.id}, body={self.body}, method={self.method}, path={self.path}{error})"
 
 
-class Response(object):
+class Response:
     def __init__(self, headers=None, body=None, content_type=None, status_code=200):
         self.headers = headers or {}
         self.body = body
@@ -431,7 +511,13 @@ class Response(object):
 class GraphContext:
     """Graph context object"""
 
-    def __init__(self, level="info", logger=None, server=None, nuclio_context=None):
+    def __init__(
+        self,
+        level="info",  # Unused argument
+        logger=None,
+        server=None,
+        nuclio_context: Optional[NuclioContext] = None,
+    ) -> None:
         self.state = None
         self.logger = logger
         self.worker_id = 0
@@ -441,11 +527,17 @@ class GraphContext:
         self.root = None
 
         if nuclio_context:
-            self.logger = nuclio_context.logger
+            self.logger: NuclioLogger = nuclio_context.logger
             self.Response = nuclio_context.Response
+            if hasattr(nuclio_context, "trigger") and hasattr(
+                nuclio_context.trigger, "kind"
+            ):
+                self.trigger = nuclio_context.trigger.kind
             self.worker_id = nuclio_context.worker_id
+            if hasattr(nuclio_context, "platform"):
+                self.platform = nuclio_context.platform
         elif not logger:
-            self.logger = create_logger(level, "human", "flow", sys.stdout)
+            self.logger: mlrun.utils.Logger = mlrun.utils.logger
 
         self._server = server
         self.current_function = None
@@ -458,9 +550,9 @@ class GraphContext:
         return self._server
 
     @property
-    def project(self):
+    def project(self) -> str:
         """current project name (for the current function)"""
-        project, _, _, _ = mlrun.utils.parse_versioned_object_uri(
+        project, _, _, _ = mlrun.common.helpers.parse_versioned_object_uri(
             self._server.function_uri
         )
         return project
@@ -498,13 +590,13 @@ class GraphContext:
         """
         if "://" in name:
             return name
-        project, uri, tag, _ = mlrun.utils.parse_versioned_object_uri(
+        project, uri, tag, _ = mlrun.common.helpers.parse_versioned_object_uri(
             self._server.function_uri
         )
         if name.startswith("."):
             name = f"{uri}-{name[1:]}"
         else:
-            project, name, tag, _ = mlrun.utils.parse_versioned_object_uri(
+            project, name, tag, _ = mlrun.common.helpers.parse_versioned_object_uri(
                 name, project
             )
         (
@@ -514,7 +606,7 @@ class GraphContext:
             _,
             _,
             function_status,
-        ) = mlrun.runtimes.function.get_nuclio_deploy_status(name, project, tag)
+        ) = mlrun.runtimes.nuclio.function.get_nuclio_deploy_status(name, project, tag)
 
         if state in ["error", "unhealthy"]:
             raise ValueError(

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Dict
+
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -36,7 +37,7 @@ class ConfusionMatrixPlan(MLPlotPlan):
         self,
         labels: np.ndarray = None,
         sample_weight: np.ndarray = None,
-        normalize: str = None,
+        normalize: Optional[str] = None,
     ):
         """
         Initialize a confusion matrix plan with the given configuration.
@@ -57,7 +58,7 @@ class ConfusionMatrixPlan(MLPlotPlan):
         self._normalize = normalize
 
         # Continue the initialization for the MLPlan:
-        super(ConfusionMatrixPlan, self).__init__()
+        super().__init__()
 
     def is_ready(self, stage: MLPlanStages, is_probabilities: bool) -> bool:
         """
@@ -78,8 +79,8 @@ class ConfusionMatrixPlan(MLPlotPlan):
         y_pred: MLTypes.DatasetType = None,
         model: MLTypes.ModelType = None,
         x: MLTypes.DatasetType = None,
-        **kwargs
-    ) -> Dict[str, Artifact]:
+        **kwargs,
+    ) -> dict[str, Artifact]:
         """
         Produce the confusion matrix according to the ground truth (y) and predictions (y_pred) values. If predictions
         are not available, the model and a dataset can be given to produce them.

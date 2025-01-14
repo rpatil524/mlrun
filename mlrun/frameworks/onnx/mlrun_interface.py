@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Callable, List
+from typing import Callable, Optional
 
 import numpy as np
 import onnx
@@ -35,7 +35,7 @@ class ONNXMLRunInterface:
     def __init__(
         self,
         model: onnx.ModelProto,
-        execution_providers: List[str] = None,
+        execution_providers: Optional[list[str]] = None,
         context: mlrun.MLClientCtx = None,
     ):
         # Set the context:
@@ -74,7 +74,7 @@ class ONNXMLRunInterface:
     def evaluate(
         self,
         dataset: ONNXDataset,
-        metrics: List[Callable[[np.ndarray, np.ndarray], float]],
+        metrics: list[Callable[[np.ndarray, np.ndarray], float]],
     ):
         pass
 

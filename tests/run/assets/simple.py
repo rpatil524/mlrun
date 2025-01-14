@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,5 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import mlrun
+
+
 def handler(context, x=1):
     context.log_result("y", x * 2)
+
+
+def get_ctx_kind_label():
+    ctx = mlrun.get_or_create_ctx("func-func")
+    return ctx.labels.get("kind")

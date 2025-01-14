@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
-from typing import Any, Dict, List, Union
+
+from typing import Any, Optional, Union
 
 from tensorflow import keras
 
 import mlrun
+import mlrun.common.constants as mlrun_constants
 
 from .callbacks import MLRunLoggingCallback, TensorboardLoggingCallback
 from .mlrun_interface import TFKerasMLRunInterface
@@ -28,21 +28,21 @@ from .utils import TFKerasTypes, TFKerasUtils
 
 def apply_mlrun(
     model: keras.Model = None,
-    model_name: str = None,
+    model_name: Optional[str] = None,
     tag: str = "",
-    model_path: str = None,
+    model_path: Optional[str] = None,
     model_format: str = TFKerasModelHandler.ModelFormats.SAVED_MODEL,
     save_traces: bool = False,
-    modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-    custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-    custom_objects_directory: str = None,
+    modules_map: Optional[Union[dict[str, Union[None, str, list[str]]], str]] = None,
+    custom_objects_map: Optional[Union[dict[str, Union[str, list[str]]], str]] = None,
+    custom_objects_directory: Optional[str] = None,
     context: mlrun.MLClientCtx = None,
     auto_log: bool = True,
-    tensorboard_directory: str = None,
-    mlrun_callback_kwargs: Dict[str, Any] = None,
-    tensorboard_callback_kwargs: Dict[str, Any] = None,
-    use_horovod: bool = None,
-    **kwargs
+    tensorboard_directory: Optional[str] = None,
+    mlrun_callback_kwargs: Optional[dict[str, Any]] = None,
+    tensorboard_callback_kwargs: Optional[dict[str, Any]] = None,
+    use_horovod: Optional[bool] = None,
+    **kwargs,
 ) -> TFKerasModelHandler:
     """
     Wrap the given model with MLRun's interface providing it with mlrun's additional features.
@@ -85,7 +85,7 @@ def apply_mlrun(
 
                                             {
                                                 "/.../custom_optimizer.py": "optimizer",
-                                                "/.../custom_layers.py": ["layer1", "layer2"]
+                                                "/.../custom_layers.py": ["layer1", "layer2"],
                                             }
 
                                         All the paths will be accessed from the given 'custom_objects_directory',
@@ -126,7 +126,9 @@ def apply_mlrun(
     # # Use horovod:
     if use_horovod is None:
         use_horovod = (
-            context.labels.get("kind", "") == "mpijob" if context is not None else False
+            context.labels.get(mlrun_constants.MLRunInternalLabels.kind, "") == "mpijob"
+            if context is not None
+            else False
         )
 
     # Create a model handler:
@@ -143,7 +145,7 @@ def apply_mlrun(
         modules_map=modules_map,
         custom_objects_map=custom_objects_map,
         custom_objects_directory=custom_objects_directory,
-        **model_handler_kwargs
+        **model_handler_kwargs,
     )
 
     # Load the model if it was not provided:
@@ -174,7 +176,7 @@ def apply_mlrun(
                 model_handler=handler,
                 log_model_tag=tag,
                 auto_log=auto_log,
-                **mlrun_callback_kwargs
+                **mlrun_callback_kwargs,
             )
         )
         model.add_logging_callback(
@@ -182,7 +184,7 @@ def apply_mlrun(
                 context=context,
                 tensorboard_directory=tensorboard_directory,
                 auto_log=auto_log,
-                **tensorboard_callback_kwargs
+                **tensorboard_callback_kwargs,
             )
         )
 

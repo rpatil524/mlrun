@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,13 +24,15 @@ from tests.system.demos.base import TestDemo
 @TestMLRunSystem.skip_test_if_env_not_configured
 @pytest.mark.enterprise
 class TestSKLearn(TestDemo):
-
     project_name = "sklearn-project"
 
     def create_demo_project(self) -> mlrun.projects.MlrunProject:
         self._logger.debug("Creating sklearn project")
         demo_project = mlrun.get_or_create_project(
-            self.project_name, str(self.assets_path), init_git=True
+            self.project_name,
+            str(self.assets_path),
+            init_git=True,
+            allow_cross_project=True,
         )
 
         self._logger.debug("Creating iris-generator function")
@@ -52,9 +54,9 @@ class TestSKLearn(TestDemo):
         self._logger.debug("Setting project functions")
         demo_project.set_function(iris_generator_function)
         demo_project.set_function("hub://describe", "describe")
-        demo_project.set_function("hub://auto_trainer", "auto_trainer")
-        demo_project.set_function("hub://model_server", "serving")
-        demo_project.set_function("hub://model_server_tester", "live_tester")
+        demo_project.set_function("hub://auto-trainer", "auto-trainer")
+        demo_project.set_function("hub://model-server", "serving")
+        demo_project.set_function("hub://model-server-tester", "live-tester")
 
         self._logger.debug("Setting project workflow")
         demo_project.set_workflow(

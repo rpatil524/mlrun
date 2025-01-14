@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,20 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import base64
 import os
 import pathlib
 import sys
 import typing
+from tempfile import NamedTemporaryFile
 
+import igz_mgmt
+import kubernetes.client as k8s_client
+import kubernetes.config
 import pytest
 import yaml
 from deepdiff import DeepDiff
 
-import mlrun.api.schemas
-from mlrun import get_run_db, mlconf, set_environment
-from mlrun.utils import create_logger
+import mlrun.common.schemas
+from mlrun import get_run_db, mlconf
+from mlrun.utils import create_test_logger
 
-logger = create_logger(level="debug", name="test-system")
+logger = create_test_logger(name="test-system")
 
 
 class TestMLRunSystem:
@@ -34,6 +39,8 @@ class TestMLRunSystem:
     env_file_path = root_path / "tests" / "system" / "env.yml"
     results_path = root_path / "tests" / "test_results" / "system"
     enterprise_marker_name = "enterprise"
+    model_monitoring_marker_name = "model_monitoring"
+    model_monitoring_marker = False
     mandatory_env_vars = [
         "MLRUN_DBPATH",
     ]
@@ -42,8 +49,16 @@ class TestMLRunSystem:
         "V3IO_FRAMESD",
         "V3IO_USERNAME",
         "V3IO_ACCESS_KEY",
+        "MLRUN_IGUAZIO_API_URL",
         "MLRUN_SYSTEM_TESTS_DEFAULT_SPARK_SERVICE",
     ]
+
+    model_monitoring_mandatory_env_vars = [
+        "MLRUN_MODEL_ENDPOINT_MONITORING__TSDB_CONNECTION",
+        "MLRUN_MODEL_ENDPOINT_MONITORING__STREAM_CONNECTION",
+    ]
+
+    enterprise_configured = os.getenv("V3IO_API")
 
     _logger = logger
 
@@ -53,10 +68,19 @@ class TestMLRunSystem:
     @classmethod
     def setup_class(cls):
         env = cls._get_env_from_file()
-        cls._test_env.update(env)
-        cls._setup_env(cls._get_env_from_file())
+        cls._setup_env(env)
+        cls._setup_k8s_client()
         cls._run_db = get_run_db()
         cls.custom_setup_class()
+        cls._logger = logger.get_child(cls.__name__.lower())
+        cls.project: typing.Optional[mlrun.projects.MlrunProject] = None
+        cls.uploaded_code = False
+
+        if "MLRUN_IGUAZIO_API_URL" in env:
+            cls._igz_mgmt_client = igz_mgmt.Client(
+                endpoint=env["MLRUN_IGUAZIO_API_URL"],
+                access_key=env["V3IO_ACCESS_KEY"],
+            )
 
         # the dbpath is already configured on the test startup before this stage
         # so even though we set the env var, we still need to directly configure
@@ -68,18 +92,25 @@ class TestMLRunSystem:
         pass
 
     def setup_method(self, method):
-        logger.info(f"Setting up test {self.__class__.__name__}::{method.__name__}")
+        self._logger.info(
+            f"Setting up test {self.__class__.__name__}::{method.__name__}"
+        )
 
         self._setup_env(self._get_env_from_file())
         self._run_db = get_run_db()
+        self.remote_code_dir = mlrun.utils.helpers.template_artifact_path(
+            mlrun.mlconf.artifact_path, self.project_name
+        )
+        self._files_to_upload = []
 
         if not self._skip_set_environment():
-            set_environment(project=self.project_name)
-            self.project = mlrun.get_or_create_project(self.project_name, "./")
+            self.project = mlrun.get_or_create_project(
+                self.project_name, "./", allow_cross_project=True
+            )
 
         self.custom_setup()
 
-        logger.info(
+        self._logger.info(
             f"Finished setting up test {self.__class__.__name__}::{method.__name__}"
         )
 
@@ -91,13 +122,15 @@ class TestMLRunSystem:
         if self._should_clean_resources():
             self._run_db.delete_project(
                 name or self.project_name,
-                deletion_strategy=mlrun.api.schemas.DeletionStrategy.cascading,
+                deletion_strategy=mlrun.common.schemas.DeletionStrategy.cascading,
             )
 
     def teardown_method(self, method):
-        logger.info(f"Tearing down test {self.__class__.__name__}::{method.__name__}")
+        self._logger.info(
+            f"Tearing down test {self.__class__.__name__}::{method.__name__}"
+        )
 
-        logger.debug("Removing test data from database")
+        self._logger.debug("Removing test data from database")
         if self._should_clean_resources():
             fsets = self._run_db.list_feature_sets()
             if fsets:
@@ -108,7 +141,7 @@ class TestMLRunSystem:
 
         self.custom_teardown()
 
-        logger.info(
+        self._logger.info(
             f"Finished tearing down test {self.__class__.__name__}::{method.__name__}"
         )
 
@@ -138,20 +171,23 @@ class TestMLRunSystem:
             if cls._has_marker(test, cls.enterprise_marker_name)
             else cls.mandatory_env_vars
         )
-        configured = True
+        if cls._has_marker(test, cls.model_monitoring_marker_name):
+            mandatory_env_vars += cls.model_monitoring_mandatory_env_vars
+
+        missing_env_vars = []
         try:
             env = cls._get_env_from_file()
         except FileNotFoundError:
-            configured = False
+            missing_env_vars = mandatory_env_vars
         else:
             for env_var in mandatory_env_vars:
                 if env_var not in env or env[env_var] is None:
-                    configured = False
+                    missing_env_vars.append(env_var)
 
         return pytest.mark.skipif(
-            not configured,
+            len(missing_env_vars) > 0,
             reason=f"This is a system test, add the needed environment variables {*mandatory_env_vars,} "
-            "in tests/system/env.yml to run it",
+            f"in tests/system/env.yml. You are missing: {missing_env_vars}",
         )(test)
 
     @classmethod
@@ -174,11 +210,9 @@ class TestMLRunSystem:
         )
 
     @property
-    def assets_path(self):
-        return (
-            pathlib.Path(sys.modules[self.__module__].__file__).absolute().parent
-            / "assets"
-        )
+    def assets_path(self) -> pathlib.Path:
+        """Returns the test file directory "assets" directory."""
+        return self.get_assets_path()
 
     @classmethod
     def _get_env_from_file(cls) -> dict:
@@ -187,29 +221,81 @@ class TestMLRunSystem:
 
     @classmethod
     def _setup_env(cls, env: dict):
-        logger.debug("Setting up test environment")
+        cls._logger.debug("Setting up test environment")
         cls._test_env.update(env)
 
-        # save old env vars for returning them on teardown
-        for env_var, value in env.items():
-            if env_var in os.environ:
-                cls._old_env[env_var] = os.environ[env_var]
+        ordered_keys = mlconf.get_ordered_keys()
 
-            if value:
-                os.environ[env_var] = value
+        # Process ordered keys
+        for key in ordered_keys & env.keys():
+            cls._process_env_var(key, env[key])
 
-        # reload the config so changes to the env vars will take effect
-        mlrun.config.config.reload()
+        # Process remaining keys
+        for key, value in env.items():
+            if key not in ordered_keys:
+                cls._process_env_var(key, value)
+
+        # Reload the config so changes to the env vars will take effect
+        mlrun.mlconf.reload()
+
+    @classmethod
+    def _process_env_var(cls, key, value):
+        if key in os.environ:
+            # Save old env vars for returning them on teardown
+            cls._old_env[key] = os.environ[key]
+
+        # Set the environment variable
+        if isinstance(value, bool):
+            os.environ[key] = "true" if value else "false"
+        elif value is not None:
+            os.environ[key] = value
+
+    @classmethod
+    def _setup_k8s_client(cls):
+        def missing_kubeclient(*args, **kwargs):
+            raise AttributeError("Kubeclient was not setup and is unavailable")
+
+        kubeconfig_content = None
+        try:
+            if kubeconfig_path := os.environ.get("MLRUN_SYSTEM_TEST_KUBECONFIG_PATH"):
+                with open(kubeconfig_path, "rb") as file:
+                    kubeconfig_content = file.read()
+            elif base64_kubeconfig_content := os.environ.get(
+                "MLRUN_SYSTEM_TEST_KUBECONFIG"
+            ):
+                kubeconfig_content = base64.b64decode(base64_kubeconfig_content)
+        except ValueError as exc:
+            logger.warning(
+                "Kubeconfig was empty or invalid.",
+                exc_info=mlrun.errors.err_to_str(exc),
+            )
+            cls.kube_client = property(missing_kubeclient)
+        if kubeconfig_content:
+            with NamedTemporaryFile() as tempfile:
+                tempfile.write(kubeconfig_content)
+                tempfile.flush()
+                try:
+                    kubernetes.config.load_kube_config(
+                        config_file=tempfile.name,
+                    )
+                    cls.kube_client = k8s_client.CoreV1Api()
+                except kubernetes.config.config_exception.ConfigException:
+                    logger.warning(
+                        "Failed to load kubeconfig, kube_client will be unavailable."
+                    )
+                    cls.kube_client = property(missing_kubeclient)
+        else:
+            cls.kube_client = property(missing_kubeclient)
 
     @classmethod
     def _teardown_env(cls):
-        logger.debug("Tearing down test environment")
+        cls._logger.debug("Tearing down test environment")
         for env_var in cls._test_env:
             if env_var in os.environ:
                 del os.environ[env_var]
         os.environ.update(cls._old_env)
         # reload the config so changes to the env vars will take affect
-        mlrun.config.config.reload()
+        mlrun.mlconf.reload()
 
     def _get_v3io_user_store_path(self, path: pathlib.Path, remote: bool = True) -> str:
         v3io_user = self._test_env["V3IO_USERNAME"]
@@ -223,16 +309,16 @@ class TestMLRunSystem:
     def _verify_run_spec(
         self,
         run_spec,
-        parameters: dict = None,
-        inputs: dict = None,
-        outputs: list = None,
-        output_path: str = None,
-        function: str = None,
-        secret_sources: list = None,
-        data_stores: list = None,
-        scrape_metrics: bool = None,
+        parameters: typing.Optional[dict] = None,
+        inputs: typing.Optional[dict] = None,
+        outputs: typing.Optional[list] = None,
+        output_path: typing.Optional[str] = None,
+        function: typing.Optional[str] = None,
+        secret_sources: typing.Optional[list] = None,
+        data_stores: typing.Optional[list] = None,
+        scrape_metrics: typing.Optional[bool] = None,
     ):
-        logger.debug("Verifying run spec", spec=run_spec)
+        self._logger.debug("Verifying run spec", spec=run_spec)
         if parameters:
             self._assert_with_deepdiff(parameters, run_spec["parameters"])
         if inputs:
@@ -253,13 +339,13 @@ class TestMLRunSystem:
     def _verify_run_metadata(
         self,
         run_metadata,
-        uid: str = None,
-        name: str = None,
-        project: str = None,
-        labels: dict = None,
-        iteration: int = None,
+        uid: typing.Optional[str] = None,
+        name: typing.Optional[str] = None,
+        project: typing.Optional[str] = None,
+        labels: typing.Optional[dict] = None,
+        iteration: typing.Optional[int] = None,
     ):
-        logger.debug("Verifying run metadata", spec=run_metadata)
+        self._logger.debug("Verifying run metadata", spec=run_metadata)
         if uid:
             assert run_metadata["uid"] == uid
         if name:
@@ -280,16 +366,25 @@ class TestMLRunSystem:
         name: str,
         project: str,
         output_path: pathlib.Path,
-        accuracy: int = None,
-        loss: int = None,
-        best_iteration: int = None,
+        accuracy: typing.Optional[int] = None,
+        loss: typing.Optional[int] = None,
+        best_iteration: typing.Optional[int] = None,
         iteration_results: bool = False,
     ):
-        logger.debug("Verifying run outputs", spec=run_outputs)
-        assert run_outputs["model"].startswith(str(output_path))
-        assert run_outputs["html_result"].startswith(str(output_path))
-        assert run_outputs["chart"].startswith(str(output_path))
-        assert run_outputs["mydf"] == f"store://artifacts/{project}/{name}_mydf:{uid}"
+        self._logger.debug("Verifying run outputs", spec=run_outputs)
+        assert run_outputs["plotly"].startswith(str(output_path))
+        assert (
+            f"store://datasets/{project}/{name}_mydf#1:latest@{uid}"
+            in run_outputs["mydf"]
+        )
+        assert (
+            f"store://artifacts/{project}/{name}_model#1:latest@{uid}"
+            in run_outputs["model"]
+        )
+        assert (
+            f"store://artifacts/{project}/{name}_html_result#1:latest@{uid}"
+            in run_outputs["html_result"]
+        )
         if accuracy:
             assert run_outputs["accuracy"] == accuracy
         if loss:
@@ -314,3 +409,12 @@ class TestMLRunSystem:
             assert DeepDiff(expected, actual, ignore_order=True) == {}
         else:
             assert expected == actual
+
+    def _upload_code_to_cluster(self):
+        if not self.uploaded_code:
+            for file in self._files_to_upload:
+                source_path = str(self.assets_path / file)
+                mlrun.get_dataitem(os.path.join(self.remote_code_dir, file)).upload(
+                    source_path
+                )
+        self.uploaded_code = True

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
+
 from abc import ABC, abstractmethod
-from typing import Dict
 
 import mlrun
 from mlrun.artifacts import Artifact
-from mlrun.utils.helpers import is_ipython
+from mlrun.utils.helpers import is_jupyter
 
 
 class Plan(ABC):
@@ -33,7 +32,7 @@ class Plan(ABC):
         self._artifacts = {}  # type: Dict[str, Artifact]
 
     @property
-    def artifacts(self) -> Dict[str, Artifact]:
+    def artifacts(self) -> dict[str, Artifact]:
         """
         Get the plan's produced artifacts.
 
@@ -59,7 +58,7 @@ class Plan(ABC):
         pass
 
     @abstractmethod
-    def produce(self, *args, **kwargs) -> Dict[str, Artifact]:
+    def produce(self, *args, **kwargs) -> dict[str, Artifact]:
         """
         Produce the artifact according to this plan.
 
@@ -85,7 +84,7 @@ class Plan(ABC):
             return
 
         # Call the correct display method according to the kernel:
-        if is_ipython:
+        if is_jupyter:
             self._gui_display()
         else:
             self._cli_display()

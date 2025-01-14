@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,33 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+import pytest
+
 import mlrun
 import tests.system.base
-from mlrun.runtimes.constants import RunStates
+from mlrun.common.runtimes.constants import RunStates
 
 
 @tests.system.base.TestMLRunSystem.skip_test_if_env_not_configured
 class TestMpiJobRuntime(tests.system.base.TestMLRunSystem):
     project_name = "does-not-exist-mpijob"
 
-    def test_run_state_completion(self):
+    @pytest.mark.smoke
+    def test_mpijob_run(self):
+        """
+        Run the `handler` function in mpijob_function.py as an OpenMPI job and validate it ran properly (see the
+        docstring of the handler for more details).
+        """
         code_path = str(self.assets_path / "mpijob_function.py")
+        replicas = 2
 
-        # Create the open mpi function:
         mpijob_function = mlrun.code_to_function(
             name="mpijob-test",
             kind="mpijob",
             handler="handler",
             project=self.project_name,
             filename=code_path,
-            image="mlrun/ml-models",
+            image="mlrun/mlrun",
         )
-        mpijob_function.spec.replicas = 4
+        mpijob_function.spec.replicas = replicas
 
-        mpijob_run = mpijob_function.run()
+        mpijob_run = mpijob_function.run(returns=["reduced_result", "rank_0_result"])
         assert mpijob_run.status.state == RunStates.completed
 
-        mpijob_time = mpijob_run.status.results["time"]
-        mpijob_result = mpijob_run.status.results["result"]
-        assert mpijob_time is not None
-        assert mpijob_result == 1000
+        reduced_result = mpijob_run.status.results["reduced_result"]
+        rank_0_result = mpijob_run.status.results["rank_0_result"]
+        assert reduced_result == replicas * 10
+        assert rank_0_result == 1000

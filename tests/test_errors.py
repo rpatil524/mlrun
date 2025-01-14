@@ -1,4 +1,4 @@
-# Copyright 2022 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,11 +18,26 @@ from unittest import mock
 import pytest
 from aiohttp import ClientResponse
 
-from mlrun.errors import MLRunHTTPError, err_to_str, raise_for_status
+import mlrun.errors
+from mlrun.errors import (
+    MLRunHTTPError,
+    err_for_status_code,
+    err_to_str,
+    raise_for_status,
+)
 
 
 def test_error_none():
     assert err_to_str(None) == ""
+
+
+def test_long_error_message_truncated():
+    err_msg = "a" * 16_000
+    err_msg += "deleteme"
+    err_msg += "b" * 16_000
+    truncated_err_msg = err_to_str(Exception(err_msg))
+    assert len(truncated_err_msg) == 32_000 + len("...truncated...")
+    assert "deleteme" not in truncated_err_msg
 
 
 def test_error_is_already_string():
@@ -69,13 +84,12 @@ def test_error_circular_chain():
 
 
 def test_raise_for_aiohttp_client_response_status():
-
     # import locally to avoid confusion with mlrun requirements sorting
     from yarl import URL
 
     response = ClientResponse(
         method="GET",
-        url=mock.MagicMock(spec=URL),
+        url=URL(),
         writer=mock.MagicMock(),
         continue100=None,
         timer=mock.MagicMock(),
@@ -94,3 +108,32 @@ def test_raise_for_aiohttp_client_response_status():
     assert isinstance(
         exc.value.response, ClientResponse
     ), "should have aiohttp client response in exception"
+
+
+class TestErrToStatusCodeError(Exception):
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        self.message = message
+
+
+@pytest.mark.parametrize(
+    "status_code, exc, message",
+    [
+        (404, mlrun.errors.MLRunNotFoundError, "message not found"),
+        ("404", mlrun.errors.MLRunNotFoundError, "message not found"),
+        (500, mlrun.errors.MLRunInternalServerError, "message internal server error"),
+        (0, mlrun.errors.MLRunHTTPError, "message http error"),
+    ],
+)
+def test_err_to_status_code(status_code, exc, message):
+    with pytest.raises(exc) as _exc:
+        try:
+            raise TestErrToStatusCodeError(status_code, message)
+        except TestErrToStatusCodeError as test_exc:
+            raise err_for_status_code(
+                test_exc.status_code, test_exc.message
+            ) from test_exc
+
+    if exc != mlrun.errors.MLRunHTTPError:
+        assert _exc.value.error_status_code == int(status_code)
+    assert message in str(_exc.value)

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ import typing
 
 import tabulate
 
-import mlrun.api.schemas
+import mlrun.common.schemas
 import mlrun.lists
 import mlrun.utils.helpers
 
@@ -31,12 +31,15 @@ class ConsoleNotification(NotificationBase):
     def push(
         self,
         message: str,
-        severity: typing.Union[
-            mlrun.api.schemas.NotificationSeverity, str
-        ] = mlrun.api.schemas.NotificationSeverity.INFO,
-        runs: typing.Union[mlrun.lists.RunList, list] = None,
-        custom_html: str = None,
+        severity: typing.Optional[
+            typing.Union[mlrun.common.schemas.NotificationSeverity, str]
+        ] = mlrun.common.schemas.NotificationSeverity.INFO,
+        runs: typing.Optional[typing.Union[mlrun.lists.RunList, list]] = None,
+        custom_html: typing.Optional[typing.Optional[str]] = None,
+        alert: typing.Optional[mlrun.common.schemas.AlertConfig] = None,
+        event_data: typing.Optional[mlrun.common.schemas.Event] = None,
     ):
+        severity = self._resolve_severity(severity)
         print(f"[{severity}] {message}")
 
         if not runs:
@@ -64,3 +67,16 @@ class ConsoleNotification(NotificationBase):
                 ]
             )
         print(tabulate.tabulate(table, headers=["status", "name", "uid", "results"]))
+
+    def _resolve_severity(
+        self, severity: typing.Union[mlrun.common.schemas.NotificationSeverity, str]
+    ):
+        if isinstance(severity, mlrun.common.schemas.NotificationSeverity):
+            return severity
+        elif isinstance(severity, str) and (
+            (severity_lowercase := severity.lower())
+            in set(mlrun.common.schemas.NotificationSeverity)
+        ):
+            return mlrun.common.schemas.NotificationSeverity(severity_lowercase)
+
+        return severity.lower()

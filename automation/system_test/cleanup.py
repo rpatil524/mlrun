@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 import asyncio
 import subprocess
 import time
-import typing
 
 import aiohttp
 import click
@@ -38,6 +37,22 @@ def main():
 def docker_images(registry_url: str, registry_container_name: str, images: str):
     images = images.split(",")
     loop = asyncio.get_event_loop()
+    try:
+        click.echo("Removing images from datanode docker")
+        _remove_image_from_datanode_docker()
+    except Exception as exc:
+        click.echo(
+            f"Unable to remove images from datanode docker: {exc}, continuing anyway"
+        )
+
+    try:
+        click.echo("Removing dangling images from datanode docker")
+        _remove_dangling_images_from_datanode_docker()
+    except Exception as exc:
+        click.echo(
+            f"Unable to remove dangling images from datanode docker: {exc}, continuing anyway"
+        )
+
     try:
         _run_registry_garbage_collection(registry_container_name)
     except Exception as exc:
@@ -62,9 +77,7 @@ def docker_images(registry_url: str, registry_container_name: str, images: str):
     _clean_images_from_local_docker_cache(tags)
 
 
-async def _collect_image_tags(
-    registry: str, images: typing.List[str]
-) -> typing.Dict[str, typing.List[str]]:
+async def _collect_image_tags(registry: str, images: list[str]) -> dict[str, list[str]]:
     """Collect all image tags from Docker Hub."""
     tags = {}
     async with aiohttp.ClientSession() as session:
@@ -81,9 +94,40 @@ async def _collect_image_tags(
     return tags
 
 
-async def _delete_image_tags(
-    registry: str, tags: typing.Dict[str, typing.List[str]]
-) -> None:
+def _remove_image_from_datanode_docker():
+    """Remove image from datanode docker"""
+    formatted_docker_images = subprocess.Popen(
+        ["docker", "images", "--format", "'{{.Repository }}:{{.Tag}}'"],
+        stdout=subprocess.PIPE,
+    )
+    grep = subprocess.Popen(
+        ["grep", "mlrun"],
+        stdin=formatted_docker_images.stdout,
+        stdout=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["xargs", "--no-run-if-empty", "docker", "rmi", "-f"],
+        stdin=grep.stdout,
+    )
+    formatted_docker_images.stdout.close()
+    grep.stdout.close()
+
+
+def _remove_dangling_images_from_datanode_docker():
+    """Remove dangling images from datanode docker"""
+
+    dangling_docker_images = subprocess.Popen(
+        ["docker", "images", "--quiet", "--filter", "dangling=true"],
+        stdout=subprocess.PIPE,
+    )
+    subprocess.run(
+        ["xargs", "--no-run-if-empty", "docker", "rmi", "-f"],
+        stdin=dangling_docker_images.stdout,
+    )
+    dangling_docker_images.stdout.close()
+
+
+async def _delete_image_tags(registry: str, tags: dict[str, list[str]]) -> None:
     for image, image_tags in tags.items():
         click.echo(f"Deleting {image} tags")
         for tag in image_tags:
@@ -140,7 +184,7 @@ def _restart_docker_registry(registry_container_name: str) -> None:
 
 
 def _clean_images_from_local_docker_cache(
-    tags: typing.Dict[str, typing.List[str]]
+    tags: dict[str, list[str]],
 ) -> None:
     """Clean images from local Docker cache."""
     command = ["docker", "rmi", "-f"]

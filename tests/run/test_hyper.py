@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
 import pathlib
+from collections.abc import Iterator
 
 import pandas as pd
+import pytest
 
 import mlrun
+import mlrun.datastore.inmem
 from mlrun import new_function, new_task
 from tests.conftest import out_path, tag_test, tests_root_directory, verify_state
 
@@ -31,7 +33,17 @@ input_file_path = str(
 base_spec.spec.inputs = {"infile.txt": str(input_file_path)}
 
 
-def test_handler_hyper():
+@pytest.fixture(autouse=True, scope="module")
+def _clean_shared_in_mem_store() -> Iterator[None]:
+    """
+    Tests in this module use the general in memory store.
+    Clean it after the tests complete to avoid cross-contamination with other modules.
+    """
+    yield
+    mlrun.datastore.in_memory_store = mlrun.datastore.inmem.InMemoryStore()
+
+
+def test_handler_hyper(rundb_mock):
     run_spec = tag_test(base_spec, "test_handler_hyper")
     run_spec.with_hyper_params({"p1": [1, 5, 3]}, selector="max.accuracy")
     result = new_function().run(run_spec, handler=my_func)
@@ -119,23 +131,26 @@ def test_hyper_list_with_stop():
 
 
 def test_hyper_parallel_with_stop():
-    list_params = '{"p2": [2,3,7,4,5], "p3": [10,10,10,10,10]}'
+    p2 = [2, 3, 7, 4, 5]
+    p3 = [10, 10, 10, 10, 10]
+    list_params = f'{{"p2": {p2}, "p3": {p3}}}'
     mlrun.datastore.set_in_memory_item("params.json", list_params)
 
     run_spec = mlrun.new_task(params={"p1": 1})
     run_spec.with_hyper_params(
-        {"p2": [2, 3, 7, 4, 5], "p3": [10, 10, 10, 10, 10]},
+        {"p2": p2, "p3": p3},
         parallel_runs=2,
         selector="max.r1",
-        strategy="list",
+        strategy=mlrun.model.HyperParamStrategies.list,
         stop_condition="r1>=70",
     )
     run = new_function().run(run_spec, handler=hyper_func)
 
     verify_state(run)
-    # result: r1 = p2 * p3, r1 >= 70 lead to stop on third run
-    # may have one extra iterations in flight so checking both 4 or 5
-    assert len(run.status.iterations) in [4, 5], "wrong number of iterations"
+
+    # + 1 for results header
+    # len(p2) tho we will stop on 3rd, there might be inflight runs going on
+    assert len(run.status.iterations) <= len(p2) + 1, "wrong number of iterations"
     assert run.output("best_iteration") == 3, "wrong best iteration"
 
 

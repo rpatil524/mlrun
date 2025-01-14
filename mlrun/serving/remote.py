@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 #
 import asyncio
 import json
+from copy import copy
+from typing import Optional
 
 import aiohttp
 import requests
@@ -21,6 +23,7 @@ import storey
 from storey.flow import _ConcurrentJobExecution
 
 import mlrun
+import mlrun.config
 from mlrun.errors import err_to_str
 from mlrun.utils import logger
 
@@ -36,29 +39,28 @@ default_backoff_factor = 1
 
 
 class RemoteStep(storey.SendToHttp):
-    """class for calling remote endpoints"""
-
     def __init__(
         self,
         url: str,
-        subpath: str = None,
-        method: str = None,
-        headers: dict = None,
-        url_expression: str = None,
-        body_expression: str = None,
+        subpath: Optional[str] = None,
+        method: Optional[str] = None,
+        headers: Optional[dict] = None,
+        url_expression: Optional[str] = None,
+        body_expression: Optional[str] = None,
         return_json: bool = True,
-        input_path: str = None,
-        result_path: str = None,
+        input_path: Optional[str] = None,
+        result_path: Optional[str] = None,
         max_in_flight=None,
         retries=None,
         backoff_factor=None,
         timeout=None,
+        headers_expression: Optional[str] = None,
         **kwargs,
     ):
         """class for calling remote endpoints
 
         sync and async graph step implementation for request/resp to remote service (class shortcut = "$remote")
-        url can be an http(s) url (e.g. "https://myservice/path") or an mlrun function uri ([project/]name).
+        url can be an http(s) url (e.g. `https://myservice/path`) or an mlrun function uri ([project/]name).
         alternatively the url_expression can be specified to build the url from the event (e.g. "event['url']").
 
         example pipeline::
@@ -86,6 +88,7 @@ class RemoteStep(storey.SendToHttp):
         :param retries:     number of retries (in exponential backoff)
         :param backoff_factor: A backoff factor in seconds to apply between attempts after the second try
         :param timeout:     How long to wait for the server to send data before giving up, float in seconds
+        :param headers_expression: an expression for getting the request headers from the event, e.g. "event['headers']"
         """
         # init retry args for storey
         retries = default_retries if retries is None else retries
@@ -102,6 +105,7 @@ class RemoteStep(storey.SendToHttp):
         self.url = url
         self.url_expression = url_expression
         self.body_expression = body_expression
+        self.headers_expression = headers_expression
         self.headers = headers
         self.method = method
         self.return_json = return_json
@@ -114,8 +118,9 @@ class RemoteStep(storey.SendToHttp):
         self._session = None
         self._url_function_handler = None
         self._body_function_handler = None
+        self._headers_function_handler = None
 
-    def post_init(self, mode="sync"):
+    def post_init(self, mode="sync", **kwargs):
         self._endpoint = self.url
         if self.url and self.context:
             self._endpoint = self.context.get_remote_endpoint(self.url).strip("/")
@@ -129,6 +134,12 @@ class RemoteStep(storey.SendToHttp):
             self._url_function_handler = eval(
                 "lambda event: " + self.url_expression,
                 {"endpoint": self._endpoint, "context": self.context},
+                {},
+            )
+        if self.headers_expression:
+            self._headers_function_handler = eval(
+                "lambda event: " + self.headers_expression,
+                {"context": self.context},
                 {},
             )
         elif self.subpath:
@@ -185,7 +196,7 @@ class RemoteStep(storey.SendToHttp):
             resp = self._session.request(
                 method,
                 url,
-                verify=False,
+                verify=mlrun.mlconf.httpdb.http.verify,
                 headers=headers,
                 data=body,
                 timeout=self.timeout,
@@ -205,7 +216,10 @@ class RemoteStep(storey.SendToHttp):
 
     def _generate_request(self, event, body):
         method = self.method or event.method or "POST"
-        headers = self.headers or {}
+        if self._headers_function_handler:
+            headers = self._headers_function_handler(body)
+        else:
+            headers = copy(self.headers) or {}
 
         if self._url_function_handler:
             url = self._url_function_handler(body)
@@ -216,10 +230,8 @@ class RemoteStep(storey.SendToHttp):
                 url = url + "/" + striped_path
             if striped_path:
                 headers[event_path_key] = event.path
-
         if event.id:
             headers[event_id_key] = event.id
-
         if method == "GET":
             body = None
         elif body is not None and not isinstance(body, (str, bytes)):
@@ -240,19 +252,17 @@ class RemoteStep(storey.SendToHttp):
 
 
 class BatchHttpRequests(_ConcurrentJobExecution):
-    """class for calling remote endpoints in parallel"""
-
     def __init__(
         self,
-        url: str = None,
-        subpath: str = None,
-        method: str = None,
-        headers: dict = None,
-        url_expression: str = None,
-        body_expression: str = None,
+        url: Optional[str] = None,
+        subpath: Optional[str] = None,
+        method: Optional[str] = None,
+        headers: Optional[dict] = None,
+        url_expression: Optional[str] = None,
+        body_expression: Optional[str] = None,
         return_json: bool = True,
-        input_path: str = None,
-        result_path: str = None,
+        input_path: Optional[str] = None,
+        result_path: Optional[str] = None,
         retries=None,
         backoff_factor=None,
         timeout=None,
@@ -261,7 +271,7 @@ class BatchHttpRequests(_ConcurrentJobExecution):
         """class for calling remote endpoints in parallel
 
         sync and async graph step implementation for request/resp to remote service (class shortcut = "$remote")
-        url can be an http(s) url (e.g. "https://myservice/path") or an mlrun function uri ([project/]name).
+        url can be an http(s) url (e.g. `https://myservice/path`) or an mlrun function uri ([project/]name).
         alternatively the url_expression can be specified to build the url from the event (e.g. "event['url']").
 
         example pipeline::
@@ -336,7 +346,7 @@ class BatchHttpRequests(_ConcurrentJobExecution):
     async def _cleanup(self):
         await self._client_session.close()
 
-    def post_init(self, mode="sync"):
+    def post_init(self, mode="sync", **kwargs):
         self._endpoint = self.url
         if self.url and self.context:
             self._endpoint = self.context.get_remote_endpoint(self.url).strip("/")

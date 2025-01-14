@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -68,7 +68,9 @@ def test_no_merger(with_queue):
     dbl.to(name="add3", class_name="Adder", add=3)
     dbl.to(name="add2", class_name="Adder", add=2)
     if with_queue:
-        graph.add_step("$queue", "q1", path="").after_step("add2", "add3").to("Gather")
+        graph.add_step("$queue", "q1", path="").after_step("add2", "add3").to(
+            "Gather", function="some_function"
+        )
     else:
         graph.add_step("Gather").after_step("add2", "add3")
 

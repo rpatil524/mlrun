@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,7 +49,6 @@ def iterate_notebooks():
     general_env = config["env"]
 
     for notebook_test_config in config["notebook_tests"]:
-
         # fill env keys that reference the general env
         test_env = {}
         for key, value in notebook_test_config.get("env", {}).items():

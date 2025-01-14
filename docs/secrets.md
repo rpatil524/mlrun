@@ -1,5 +1,5 @@
 (secrets)=
-# Working with secrets  <!-- omit in toc -->
+# Working with secrets<!-- omit in toc -->
 When executing jobs through MLRun, the code might need access to specific secrets, for example to access data 
 residing on a data-store that requires credentials (such as a private S3 bucket), or many other similar needs.
 
@@ -10,11 +10,11 @@ and how much exposure they create for your secrets.
 **In this section**
 - [Overview](#overview)
 - [MLRun-managed secrets](#mlrun-managed-secrets)
-  - [Using tasks with secrets](#using-tasks-with-secrets) 
+  - [Using tasks with secrets](#using-tasks-with-secrets)
   - [Secret providers](#secret-providers)
-     - [Kubernetes project secrets](#kubernetes-project-secrets)
-     - [Azure Vault](#azure-vault)
-     - [Demo/Development secret providers](#demo-development-secret-providers)
+    - [Kubernetes project secrets](#kubernetes-project-secrets)
+    - [Azure Vault](#azure-vault)
+    - [Demo/Development secret providers](#demodevelopment-secret-providers)
 - [Externally managed secrets](#externally-managed-secrets)
   - [Mapping secrets to environment](#mapping-secrets-to-environment)
   - [Mapping secrets as files](#mapping-secrets-as-files)
@@ -40,7 +40,7 @@ The following is an example of using project secrets:
 ```python
 # Create project secrets for the myproj project
 project = mlrun.get_or_create_project("myproj", "./")
-secrets = {'AWS_KEY': '111222333'}
+secrets = {"AWS_KEY": "111222333"}
 project.set_secrets(secrets=secrets, provider="kubernetes")
 
 # Create and run the MLRun job
@@ -49,7 +49,7 @@ function = mlrun.code_to_function(
     filename="my_code.py",
     handler="test_function",
     kind="job",
-    image="mlrun/mlrun"
+    image="mlrun/mlrun",
 )
 function.run()
 ```
@@ -133,7 +133,7 @@ a file containing a list of secrets. For example:
 ```python
 # Create project secrets for the myproj project.
 project = mlrun.get_or_create_project("myproj", "./")
-secrets = {'password': 'myPassw0rd', 'AWS_KEY': '111222333'}
+secrets = {"password": "myPassw0rd", "AWS_KEY": "111222333"}
 project.set_secrets(secrets=secrets, provider="kubernetes")
 ```
 
@@ -164,7 +164,7 @@ It is possible to limit access of an executing job to a
 subset of these secrets by calling the following function with a list of the secrets to be accessed:
 
 ```python
-task.with_secrets('kubernetes', ['password', 'AWS_KEY'])
+task.with_secrets("kubernetes", ["password", "AWS_KEY"])
 ```
 
 When the job is executed, the MLRun framework adds environment variables to the pod spec whose value is retrieved 
@@ -182,10 +182,10 @@ To maintain the confidentiality of secret values, these operations must be stric
 k8s RBAC and ensuring that elevated permissions are granted to a very limited number of users (very few users have and 
 use elevated permissions).
 
-##### Accessing secrets in nuclio functions
+##### Accessing secrets in Nuclio functions
 
 Nuclio functions do not have the MLRun context available to retrieve secret values. Secret values need to be retrieved 
-from the environment variable of the same name. For example, to access the `AWS_KEY` secret in a nuclio function use:
+from the environment variable of the same name. For example, to access the `AWS_KEY` secret in a Nuclio function use:
 ```python
 aws_key = os.environ.get("AWS_KEY")
 ```
@@ -210,7 +210,7 @@ To configure this, the following steps are needed:
 3. Assign a key vault access policy to the service principal, as described in 
    [this page](https://docs.microsoft.com/en-us/azure/key-vault/general/assign-access-policy-portal).
 4. Create a secret access key for the service principal, following the steps listed in [this page]( 
-   https://docs.microsoft.com/en-us/azure/active-directory/develop/howto-create-service-principal-portal#get-tenant-and-app-id-values-for-signing-in). 
+   https://docs.microsoft.com/en-us/azure/active-directory/develop/howto-create-service-principal-portal#register-an-application-with-microsoft-entra-id-and-create-a-service-principal). 
     Make sure you have access to the following three identifiers:
    
     - Directory (tenant) id
@@ -237,8 +237,8 @@ Once these steps are done, use `with_secrets` in the following manner:
 task.with_secrets(
     "azure_vault",
     {
-        "name": <azure_key_vault_name>,
-        "k8s_secret": <azure_key_vault_k8s_secret>,
+        "name": "<azure_key_vault_name>",
+        "k8s_secret": "<azure_key_vault_k8s_secret>",
         "secrets": [],
     },
 )
@@ -317,9 +317,11 @@ MLRun provides facilities to map k8s secrets that were created externally to job
 the spec of the runtime that is created should be modified by mounting secrets to it - either as files or as 
 environment variables containing specific keys from the secret.
 
+In the following examples, assume a k8s secret called `my-secret` was created in the same k8s namespace where MLRun is running, with two
+keys in it - `secret1` and `secret2`.
+
 ### Mapping secrets to environment
-Let's assume a k8s secret called `my-secret` was created in the same k8s namespace where MLRun is running, with two
-keys in it - `secret1` and `secret2`. The following example adds these two secret keys as environment variables
+ The following example adds these two secret keys as environment variables
 to an MLRun job:
 
 ```{code-block} python
@@ -359,9 +361,9 @@ function:
 
 ```python
 # Mount all keys in the secret as files under /mnt/secrets
-function.mount_secret("my-secret", "/mnt/secrets/")
+function.apply(mlrun.platforms.mount_secret("my-secret", "/mnt/secrets/"))
 ```
 
-This creates two files in the function pod, called `/mnt/secrets/secret1` and `/mnt/secrets/secret2`. Reading these
+In our example, the two keys in `my-secret` are created as two files in the function pod, called `/mnt/secrets/secret1` and `/mnt/secrets/secret2`. Reading these
 files provide the values. It is possible to limit the keys mounted to the function - see the documentation
 of {py:func}`~mlrun.platforms.mount_secret` for more details.

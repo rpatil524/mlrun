@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,12 @@
 #
 version: 2
 
+# Set the OS, Python version and other tools you might need
+build:
+  os: ubuntu-22.04
+  tools:
+    python: "3.9"
+
 # Build documentation in the docs/ directory with Sphinx
 sphinx:
   configuration: docs/conf.py
@@ -21,9 +27,16 @@ sphinx:
 formats: all
 
 python:
-  version: 3.7
   install:
-    - requirements: requirements.txt
-    - requirements: dev-requirements.txt
-    - requirements: dockerfiles/mlrun-api/requirements.txt
     - requirements: docs/requirements.txt
+
+search:
+  ignore:
+    # https://github.com/readthedocs/readthedocs.org/issues/10911
+    - '*/01-mlrun-basics-colab.html'
+
+    # Defaults
+    - search.html
+    - search/index.html
+    - 404.html
+    - 404/index.html

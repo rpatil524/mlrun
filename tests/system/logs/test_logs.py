@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,18 +13,24 @@
 # limitations under the License.
 #
 
+import pytest
+
 import mlrun
 import tests.system.base
 
 
 @tests.system.base.TestMLRunSystem.skip_test_if_env_not_configured
 class TestLogCollector(tests.system.base.TestMLRunSystem):
-    custom_project_names_to_delete = []
+    def custom_setup(self):
+        super().custom_setup()
+        self.custom_project_names_to_delete = []
 
     def custom_teardown(self):
+        super().custom_teardown()
         for name in self.custom_project_names_to_delete:
             self._delete_test_project(name)
 
+    @pytest.mark.smoke
     def test_log_collector(self):
         self._logger.debug("Testing log collector")
 
@@ -35,7 +41,9 @@ class TestLogCollector(tests.system.base.TestMLRunSystem):
 
         project_name = "test-log-collector"
         self.custom_project_names_to_delete.append(project_name)
-        proj = mlrun.get_or_create_project(project_name, self.assets_path)
+        proj = mlrun.get_or_create_project(
+            project_name, self.assets_path, allow_cross_project=True
+        )
         function = mlrun.code_to_function(
             name="function-with-logs",
             kind="job",
@@ -63,5 +71,12 @@ class TestLogCollector(tests.system.base.TestMLRunSystem):
 
         # verify the logs are not empty
         assert logs, "Expected logs to be not empty"
+
+        # test log size
+        log_size = mlrun.get_run_db().get_log_size(
+            uid=run.metadata.uid,
+            project=proj.name,
+        )
+        assert log_size, "Expected log size to be not zero"
 
         self._logger.debug("Finished log collector test")

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 import time
 from os import listdir, makedirs, path, stat
 from shutil import copyfile
+from typing import Optional
 
 import fsspec
 
@@ -23,7 +24,9 @@ from .base import DataStore, FileStats
 
 
 class FileStore(DataStore):
-    def __init__(self, parent, schema, name, endpoint="", secrets: dict = None):
+    def __init__(
+        self, parent, schema, name, endpoint="", secrets: Optional[dict] = None
+    ):
         super().__init__(parent, name, "file", endpoint, secrets=secrets)
 
         self._item_path, self._real_path = None, None
@@ -47,7 +50,8 @@ class FileStore(DataStore):
                 key = path.join(self._real_path, suffix)
         return path.join(self.subpath, key)
 
-    def get_filesystem(self, silent=True):
+    @property
+    def filesystem(self):
         """return fsspec file system object, if supported"""
         if not self._filesystem:
             self._filesystem = fsspec.filesystem("file")
@@ -65,9 +69,7 @@ class FileStore(DataStore):
         dir_to_create = path.dirname(self._join(key))
         if dir_to_create:
             self._ensure_directory(dir_to_create)
-        mode = "a" if append else "w"
-        if isinstance(data, bytes):
-            mode = mode + "b"
+        data, mode = self._prepare_put_data(data, append)
         with open(self._join(key), mode) as fp:
             fp.write(data)
             fp.close()
@@ -104,4 +106,3 @@ class FileStore(DataStore):
                 return
             except FileExistsError:
                 time.sleep(0.1)
-                pass

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,6 @@
 #
 import re
 
-import dask.dataframe as dd
-from dask.dataframe.multi import merge, merge_asof
-from dask.distributed import Client
-
 import mlrun
 
 from .base import BaseMerger
@@ -25,9 +21,17 @@ from .base import BaseMerger
 
 class DaskFeatureMerger(BaseMerger):
     engine = "dask"
+    support_offline = True
 
     def __init__(self, vector, **engine_args):
         super().__init__(vector, **engine_args)
+        try:
+            import dask  # noqa: F401
+        except (ModuleNotFoundError, ImportError) as exc:
+            raise ImportError(
+                "Using 'DaskFeatureMerger' requires dask package. Use pip install mlrun[dask] to install it."
+            ) from exc
+
         self.client = engine_args.get("dask_client")
         self._dask_cluster_uri = engine_args.get("dask_cluster_uri")
 
@@ -40,23 +44,43 @@ class DaskFeatureMerger(BaseMerger):
         self,
         entity_df,
         entity_timestamp_column: str,
-        featureset,
-        featureset_df,
+        featureset_name: str,
+        featureset_timestamp: str,
+        featureset_df: list,
         left_keys: list,
         right_keys: list,
     ):
+        from dask.dataframe.multi import merge_asof
+
+        featureset_df = self._normalize_timestamp_column(
+            entity_timestamp_column,
+            entity_df,
+            featureset_timestamp,
+            featureset_df,
+            featureset_name,
+        )
+
+        def sort_partition(partition, timestamp):
+            return partition.sort_values(timestamp)
+
+        entity_df = entity_df.map_partitions(
+            sort_partition, timestamp=entity_timestamp_column
+        )
+        featureset_df = featureset_df.map_partitions(
+            sort_partition, timestamp=featureset_timestamp
+        )
 
         merged_df = merge_asof(
             entity_df,
             featureset_df,
             left_on=entity_timestamp_column,
-            right_on=entity_timestamp_column,
+            right_on=featureset_timestamp,
             left_by=left_keys or None,
             right_by=right_keys or None,
-            suffixes=("", f"_{featureset.metadata.name}_"),
+            suffixes=("", f"_{featureset_name}_"),
         )
         for col in merged_df.columns:
-            if re.findall(f"_{featureset.metadata.name}_$", col):
+            if re.findall(f"_{featureset_name}_$", col):
                 self._append_drop_column(col)
 
         return merged_df
@@ -65,23 +89,24 @@ class DaskFeatureMerger(BaseMerger):
         self,
         entity_df,
         entity_timestamp_column: str,
-        featureset,
+        featureset_name,
+        featureset_timestamp,
         featureset_df,
         left_keys: list,
         right_keys: list,
     ):
+        from dask.dataframe.multi import merge
 
-        fs_name = featureset.metadata.name
         merged_df = merge(
             entity_df,
             featureset_df,
             how=self._join_type,
             left_on=left_keys,
             right_on=right_keys,
-            suffixes=("", f"_{fs_name}_"),
+            suffixes=("", f"_{featureset_name}_"),
         )
         for col in merged_df.columns:
-            if re.findall(f"_{fs_name}_$", col):
+            if re.findall(f"_{featureset_name}_$", col):
                 self._append_drop_column(col)
         return merged_df
 
@@ -99,6 +124,8 @@ class DaskFeatureMerger(BaseMerger):
         return df
 
     def _create_engine_env(self):
+        from dask.distributed import Client
+
         if "index" not in self._index_columns:
             self._append_drop_column("index")
 
@@ -117,15 +144,19 @@ class DaskFeatureMerger(BaseMerger):
         column_names=None,
         start_time=None,
         end_time=None,
-        entity_timestamp_column=None,
+        time_column=None,
+        additional_filters=None,
     ):
+        import dask.dataframe as dd
+
         df = feature_set.to_dataframe(
             columns=column_names,
             df_module=dd,
             start_time=start_time,
             end_time=end_time,
-            time_column=entity_timestamp_column,
+            time_column=time_column,
             index=False,
+            additional_filters=additional_filters,
         )
 
         return self._reset_index(df).persist()
@@ -145,3 +176,11 @@ class DaskFeatureMerger(BaseMerger):
 
     def _order_by(self, order_by_active):
         self._result_df.sort_values(by=order_by_active)
+
+    def _convert_entity_rows_to_engine_df(self, entity_rows):
+        import dask.dataframe as dd
+
+        if entity_rows is not None and not hasattr(entity_rows, "dask"):
+            return dd.from_pandas(entity_rows, npartitions=len(entity_rows.columns))
+
+        return entity_rows

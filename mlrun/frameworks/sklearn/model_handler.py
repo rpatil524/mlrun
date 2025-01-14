@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 #
 import os
 import pickle
+from typing import Optional
 
 import cloudpickle
 
@@ -49,7 +50,7 @@ class SKLearnModelHandler(MLModelHandler):
             )
 
     @without_mlrun_interface(interface=SKLearnMLRunInterface)
-    def save(self, output_path: str = None, **kwargs):
+    def save(self, output_path: Optional[str] = None, **kwargs):
         """
         Save the handled model at the given output path. If a MLRun context is available, the saved model files will be
         logged and returned as artifacts.
@@ -59,7 +60,7 @@ class SKLearnModelHandler(MLModelHandler):
 
         :return The saved model additional artifacts (if needed) dictionary if context is available and None otherwise.
         """
-        super(SKLearnModelHandler, self).save(output_path=output_path)
+        super().save(output_path=output_path)
 
         # Save the model pkl file:
         self._model_file = f"{self._model_name}.pkl"
@@ -73,7 +74,7 @@ class SKLearnModelHandler(MLModelHandler):
         Load the specified model in this handler. Additional parameters for the class initializer can be passed via the
         kwargs dictionary.
         """
-        super(SKLearnModelHandler, self).load()
+        super().load()
 
         # Load from a pkl file:
         with open(self._model_file, "rb") as pickle_file:
@@ -81,10 +82,10 @@ class SKLearnModelHandler(MLModelHandler):
 
     def to_onnx(
         self,
-        model_name: str = None,
+        model_name: Optional[str] = None,
         optimize: bool = True,
         input_sample: SKLearnTypes.DatasetType = None,
-        log: bool = None,
+        log: Optional[bool] = None,
     ):
         """
         Convert the model in this handler to an ONNX model. The inputs names are optional, they do not change the

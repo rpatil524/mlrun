@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
-
 __all__ = [
     "get_version",
     "set_environment",
@@ -22,10 +20,14 @@ __all__ = [
     "handler",
     "ArtifactType",
     "get_secret_or_env",
+    "mount_v3io",
+    "v3io_cred",
+    "auto_mount",
+    "VolumeMount",
 ]
 
-import warnings
 from os import environ, path
+from typing import Optional
 
 import dotenv
 
@@ -35,15 +37,9 @@ from .db import get_run_db
 from .errors import MLRunInvalidArgumentError, MLRunNotFoundError
 from .execution import MLClientCtx
 from .model import RunObject, RunTemplate, new_task
-from .platforms import (
-    VolumeMount,
-    auto_mount,
-    mount_v3io,
-    mount_v3io_extended,
-    mount_v3io_legacy,
-    v3io_cred,
-)
+from .package import ArtifactType, DefaultPackager, Packager, handler
 from .projects import (
+    MlrunProject,
     ProjectMetadata,
     build_function,
     deploy_function,
@@ -62,18 +58,21 @@ from .run import (
     get_object,
     get_or_create_ctx,
     get_pipeline,
-    handler,
     import_function,
     new_function,
-    run_local,
-    run_pipeline,
+    retry_pipeline,
     wait_for_pipeline_completion,
 )
-from .runtimes import ArtifactType, new_model_server
+from .runtimes import mounts, new_model_server
 from .secrets import get_secret_or_env
 from .utils.version import Version
 
 __version__ = Version().get()["version"]
+
+VolumeMount = mounts.VolumeMount
+mount_v3io = mounts.mount_v3io
+v3io_cred = mounts.v3io_cred
+auto_mount = mounts.auto_mount
 
 
 def get_version():
@@ -89,14 +88,12 @@ if "IGZ_NAMESPACE_DOMAIN" in environ:
 
 
 def set_environment(
-    api_path: str = None,
+    api_path: Optional[str] = None,
     artifact_path: str = "",
-    project: str = "",
-    access_key: str = None,
-    user_project=False,
-    username: str = None,
-    env_file: str = None,
-    mock_functions: str = None,
+    access_key: Optional[str] = None,
+    username: Optional[str] = None,
+    env_file: Optional[str] = None,
+    mock_functions: Optional[str] = None,
 ):
     """set and test default config for: api path, artifact_path and project
 
@@ -109,18 +106,15 @@ def set_environment(
     example::
 
         from os import path
-        project_name, artifact_path = set_environment(project='my-project')
+
+        project_name, artifact_path = set_environment()
         set_environment("http://localhost:8080", artifact_path="./")
         set_environment(env_file="mlrun.env")
         set_environment("<remote-service-url>", access_key="xyz", username="joe")
 
     :param api_path:       location/url of mlrun api service
     :param artifact_path:  path/url for storing experiment artifacts
-    :param project:        default project name (deprecated in 1.3.0 and will be removed in 1.5.0) - use project
-                           APIs such as `get_or_create_project`, `load_project` to configure the active project
     :param access_key:     set the remote cluster access key (V3IO_ACCESS_KEY)
-    :param user_project:   add the current user name to the provided project name (making it unique per user)
-                           (deprecated in 1.3.0 and will be removed in 1.5.0)
     :param username:       name of the user to authenticate
     :param env_file:       path/url to .env file (holding MLRun config and other env vars), see: set_env_from_file()
     :param mock_functions: set to True to create local/mock functions instead of real containers,
@@ -129,14 +123,6 @@ def set_environment(
         default project name
         actual artifact path/url, can be used to create subpaths per task or group of artifacts
     """
-    if user_project or project:
-        warnings.warn(
-            "'user_project' and 'project' are deprecated in 1.3.0, and will be removed in 1.5.0, use project "
-            "APIs such as 'get_or_create_project', 'load_project' to configure the active project.",
-            # TODO: Remove in 1.5.0
-            FutureWarning,
-        )
-
     if env_file:
         set_env_from_file(env_file)
 
@@ -150,26 +136,16 @@ def set_environment(
     if not mlconf.dbpath:
         raise ValueError("DB/API path was not detected, please specify its address")
 
-    if mock_functions is not None:
-        mock_functions = "1" if mock_functions is True else mock_functions
-        mlconf.force_run_local = mock_functions
-        mlconf.mock_nuclio_deployment = mock_functions
-
     # check connectivity and load remote defaults
     get_run_db()
     if api_path:
         environ["MLRUN_DBPATH"] = mlconf.dbpath
+    mlconf.reload()
 
-    project = _add_username_to_project_name_if_needed(project, user_project)
-    if project:
-        ProjectMetadata.validate_project_name(project)
-
-    mlconf.default_project = project or mlconf.default_project
-    # We want to ensure the project exists, and verify we're authorized to work on it
-    # if it doesn't exist this will create it (and obviously if we created it, we're authorized to work on it)
-    # if it does exist - this will get it, which will fail if we're not authorized to work on it
-    if project:
-        get_or_create_project(mlconf.default_project, "./")
+    if mock_functions is not None:
+        mock_functions = "1" if mock_functions is True else mock_functions
+        mlconf.force_run_local = mock_functions
+        mlconf.mock_nuclio_deployment = mock_functions
 
     if not mlconf.artifact_path and not artifact_path:
         raise ValueError(
@@ -184,13 +160,14 @@ def set_environment(
                 "artifact_path must refer to an absolute path" " or a valid url"
             )
         mlconf.artifact_path = artifact_path
+
     return mlconf.default_project, mlconf.artifact_path
 
 
-def get_current_project(silent=False):
+def get_current_project(silent: bool = False) -> Optional[MlrunProject]:
     if not pipeline_context.project and not silent:
         raise MLRunInvalidArgumentError(
-            "current project is not initialized, use new, get or load project methods first"
+            "No current project is initialized. Use new, get or load project functions first."
         )
     return pipeline_context.project
 
@@ -207,7 +184,7 @@ def get_sample_path(subpath=""):
     return samples_path
 
 
-def set_env_from_file(env_file: str, return_dict: bool = False):
+def set_env_from_file(env_file: str, return_dict: bool = False) -> Optional[dict]:
     """Read and set and/or return environment variables from a file
     the env file should have lines in the form KEY=VALUE, comment line start with "#"
 
@@ -236,7 +213,41 @@ def set_env_from_file(env_file: str, return_dict: bool = False):
     env_vars = dotenv.dotenv_values(env_file)
     if None in env_vars.values():
         raise MLRunInvalidArgumentError("env file lines must be in the form key=value")
-    for key, value in env_vars.items():
-        environ[key] = value  # Load to local environ
+
+    ordered_env_vars = order_env_vars(env_vars)
+    for key, value in ordered_env_vars.items():
+        environ[key] = value
+
     mlconf.reload()  # reload mlrun configuration
-    return env_vars if return_dict else None
+    return ordered_env_vars if return_dict else None
+
+
+def order_env_vars(env_vars: dict[str, str]) -> dict[str, str]:
+    """
+    Order and process environment variables by first handling specific ordered keys,
+    then processing the remaining keys in the given dictionary.
+
+    The function ensures that environment variables defined in the `ordered_keys` list
+    are added to the result dictionary first. Any other environment variables from
+    `env_vars` are then added in the order they appear in the input dictionary.
+
+    :param env_vars: A dictionary where each key is the name of an environment variable (str),
+                      and each value is the corresponding environment variable value (str).
+    :return: A dictionary with the processed environment variables, ordered with the specific
+             keys first, followed by the rest in their original order.
+    """
+    ordered_keys = mlconf.get_ordered_keys()
+
+    ordered_env_vars: dict[str, str] = {}
+
+    # First, add the ordered keys to the dictionary
+    for key in ordered_keys:
+        if key in env_vars:
+            ordered_env_vars[key] = env_vars[key]
+
+    # Then, add the remaining keys (those not in ordered_keys)
+    for key, value in env_vars.items():
+        if key not in ordered_keys:
+            ordered_env_vars[key] = value
+
+    return ordered_env_vars

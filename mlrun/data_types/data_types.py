@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -41,6 +41,7 @@ class ValueType(str, Enum):
     BYTES = "bytes"
     STRING = "str"
     DATETIME = "datetime"
+    LIST = "List"
     BYTES_LIST = "List[bytes]"
     STRING_LIST = "List[string]"
     INT32_LIST = "List[int32]"
@@ -48,6 +49,7 @@ class ValueType(str, Enum):
     DOUBLE_LIST = "List[float]"
     FLOAT_LIST = "List[float32]"
     BOOL_LIST = "List[bool]"
+    Tuple = "Tuple"
 
 
 def pd_schema_to_value_type(value):
@@ -67,6 +69,11 @@ def pa_type_to_value_type(type_):
     # To catch timestamps with timezones. This also catches timestamps with different units
     if isinstance(type_, TimestampType):
         return ValueType.DATETIME
+
+    # pandas category type translates to pyarrow DictionaryType
+    # we need to unpack the value type (ML-7868)
+    if isinstance(type_, pyarrow.DictionaryType):
+        type_ = type_.value_type
 
     type_map = {
         pyarrow.bool_(): ValueType.BOOL,
@@ -102,6 +109,8 @@ def python_type_to_value_type(value_type):
         "datetime64[ns]": ValueType.INT64,
         "datetime64[ns, tz]": ValueType.INT64,
         "category": ValueType.STRING,
+        "list": ValueType.LIST,
+        "tuple": ValueType.Tuple,
     }
 
     if type_name in type_map:
@@ -115,6 +124,7 @@ def spark_to_value_type(data_type):
         "double": ValueType.DOUBLE,
         "boolean": ValueType.BOOL,
         "timestamp": ValueType.DATETIME,
+        "timestamp_ntz": ValueType.DATETIME,
         "string": ValueType.STRING,
         "array": "list",
         "map": "dict",
@@ -135,7 +145,7 @@ def gbq_to_pandas_dtype(gbq_type):
         "BOOL": "bool",
         "FLOAT": "float64",
         "INTEGER": pd.Int64Dtype(),
-        "TIMESTAMP": "datetime64[ns]",
+        "TIMESTAMP": "datetime64[ns, UTC]",
     }
     return type_map.get(gbq_type, "object")
 

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Dict, List, Optional, Union
-
-import kfp
+import typing
+import warnings
+from typing import Optional, Union
 
 import mlrun
+import mlrun.common.constants as mlrun_constants
+import mlrun.common.schemas.function
+import mlrun.common.schemas.workflow
+import mlrun_pipelines.common.models
+import mlrun_pipelines.models
 from mlrun.utils import hub_prefix
 
 from .pipelines import enrich_function_object, pipeline_context
@@ -47,34 +52,36 @@ def _get_engine_and_function(function, project=None):
         function = enrich_function_object(project, function, copy_function=False)
 
     if not pipeline_context.workflow:
-        return "local", function
+        return mlrun.common.schemas.workflow.EngineType.LOCAL, function
 
     return pipeline_context.workflow.engine, function
 
 
 def run_function(
     function: Union[str, mlrun.runtimes.BaseRuntime],
-    handler: str = None,
+    handler: Optional[Union[str, typing.Callable]] = None,
     name: str = "",
-    params: dict = None,
-    hyperparams: dict = None,
+    params: Optional[dict] = None,
+    hyperparams: Optional[dict] = None,
     hyper_param_options: mlrun.model.HyperParamOptions = None,
-    inputs: dict = None,
-    outputs: List[str] = None,
+    inputs: Optional[dict] = None,
+    outputs: Optional[list[str]] = None,
     workdir: str = "",
-    labels: dict = None,
+    labels: Optional[dict] = None,
     base_task: mlrun.model.RunTemplate = None,
     watch: bool = True,
-    local: bool = None,
-    verbose: bool = None,
-    selector: str = None,
+    local: Optional[bool] = None,
+    verbose: Optional[bool] = None,
+    selector: Optional[str] = None,
     project_object=None,
-    auto_build: bool = None,
-    schedule: Union[str, mlrun.api.schemas.ScheduleCronTrigger] = None,
-    artifact_path: str = None,
-    notifications: List[mlrun.model.Notification] = None,
-    returns: Optional[List[Union[str, Dict[str, str]]]] = None,
-) -> Union[mlrun.model.RunObject, kfp.dsl.ContainerOp]:
+    auto_build: Optional[bool] = None,
+    schedule: Union[str, mlrun.common.schemas.ScheduleCronTrigger] = None,
+    artifact_path: Optional[str] = None,
+    notifications: Optional[list[mlrun.model.Notification]] = None,
+    returns: Optional[list[Union[str, dict[str, str]]]] = None,
+    builder_env: Optional[list] = None,
+    reset_on_run: Optional[bool] = None,
+) -> Union[mlrun.model.RunObject, mlrun_pipelines.models.PipelineNodeWrapper]:
     """Run a local or remote task as part of a local/kubeflow pipeline
 
     run_function() allow you to execute a function locally, on a remote cluster, or as part of an automated workflow
@@ -84,7 +91,7 @@ def run_function(
     when functions run as part of a workflow/pipeline (project.run()) some attributes can be set at the run level,
     e.g. local=True will run all the functions locally, setting artifact_path will direct all outputs to the same path.
     project runs provide additional notifications/reporting and exception handling.
-    inside a Kubeflow pipeline (KFP) run_function() generates KFP "ContainerOps" which are used to form a DAG
+    inside a Kubeflow pipeline (KFP) run_function() generates KFP node (see PipelineNodeWrapper) which forms a DAG
     some behavior may differ between regular runs and deferred KFP runs.
 
     example (use with function object)::
@@ -92,16 +99,19 @@ def run_function(
         LABELS = "is_error"
         MODEL_CLASS = "sklearn.ensemble.RandomForestClassifier"
         DATA_PATH = "s3://bigdata/data.parquet"
-        function = mlrun.import_function("hub://auto_trainer")
-        run1 = run_function(function, params={"label_columns": LABELS, "model_class": MODEL_CLASS},
-                                      inputs={"dataset": DATA_PATH})
+        function = mlrun.import_function("hub://auto-trainer")
+        run1 = run_function(
+            function,
+            params={"label_columns": LABELS, "model_class": MODEL_CLASS},
+            inputs={"dataset": DATA_PATH},
+        )
 
     example (use with project)::
 
-        # create a project with two functions (local and from marketplace)
+        # create a project with two functions (local and from hub)
         project = mlrun.new_project(project_name, "./proj)
         project.set_function("mycode.py", "myfunc", image="mlrun/mlrun")
-        project.set_function("hub://auto_trainer", "train")
+        project.set_function("hub://auto-trainer", "train")
 
         # run functions (refer to them by name)
         run1 = run_function("myfunc", params={"x": 7})
@@ -112,9 +122,13 @@ def run_function(
 
         @dsl.pipeline(name="test pipeline", description="test")
         def my_pipe(url=""):
-            run1 = run_function("loaddata", params={"url": url})
-            run2 = run_function("train", params={"label_columns": LABELS, "model_class": MODEL_CLASS},
-                                         inputs={"dataset": run1.outputs["data"]})
+            run1 = run_function("loaddata", params={"url": url}, outputs=["data"])
+            run2 = run_function(
+                "train",
+                params={"label_columns": LABELS, "model_class": MODEL_CLASS},
+                inputs={"dataset": run1.outputs["data"]},
+            )
+
 
         project.run(workflow_handler=my_pipe, arguments={"param1": 7})
 
@@ -138,7 +152,7 @@ def run_function(
     :param verbose:         add verbose prints/logs
     :param project_object:  override the project object to use, will default to the project set in the runtime context.
     :param auto_build:      when set to True and the function require build it will be built on the first
-                            function run, use only if you dont plan on changing the build config between runs
+                            function run, use only if you do not plan on changing the build config between runs
     :param schedule:        ScheduleCronTrigger class instance or a standard crontab expression string
                             (which will be converted to the class using its `from_crontab` constructor),
                             see this link for help:
@@ -156,7 +170,11 @@ def run_function(
                             * A dictionary of configurations to use when logging. Further info per object type and
                               artifact type can be given there. The artifact key must appear in the dictionary as
                               "key": "the_key".
-    :return: MLRun RunObject or KubeFlow containerOp
+    :param builder_env:     env vars dict for source archive config/credentials e.g. builder_env={"GIT_TOKEN": token}
+    :param reset_on_run:    When True, function python modules would reload prior to code execution.
+                            This ensures latest code changes are executed. This argument must be used in
+                            conjunction with the local=True argument.
+    :return: MLRun RunObject or PipelineNodeWrapper
     """
     engine, function = _get_engine_and_function(function, project_object)
     task = mlrun.new_task(
@@ -171,7 +189,11 @@ def run_function(
     )
     task.spec.verbose = task.spec.verbose or verbose
 
-    if engine == "kfp":
+    if engine == mlrun.common.schemas.workflow.EngineType.KFP:
+        if schedule:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "Scheduling jobs is not supported when running a workflow with the kfp engine."
+            )
         return function.as_step(
             name=name, runspec=task, workdir=workdir, outputs=outputs, labels=labels
         )
@@ -180,7 +202,9 @@ def run_function(
         local = pipeline_context.is_run_local(local)
         task.metadata.labels = task.metadata.labels or labels or {}
         if pipeline_context.workflow_id:
-            task.metadata.labels["workflow"] = pipeline_context.workflow_id
+            task.metadata.labels[mlrun_constants.MLRunInternalLabels.workflow] = (
+                pipeline_context.workflow_id
+            )
         if function.kind == "local":
             command, function = mlrun.run.load_func_code(function)
             function.spec.command = command
@@ -201,6 +225,8 @@ def run_function(
             auto_build=auto_build,
             schedule=schedule,
             notifications=notifications,
+            builder_env=builder_env,
+            reset_on_run=reset_on_run,
         )
         if run_result:
             run_result._notified = False
@@ -214,9 +240,9 @@ def run_function(
 class BuildStatus:
     """returned status from build operation"""
 
-    def __init__(self, ready, outputs={}, function=None):
+    def __init__(self, ready, outputs=None, function=None):
         self.ready = ready
-        self.outputs = outputs
+        self.outputs = outputs or {}
         self.function = function
 
     def after(self, step):
@@ -229,47 +255,65 @@ class BuildStatus:
 
 def build_function(
     function: Union[str, mlrun.runtimes.BaseRuntime],
-    with_mlrun: bool = None,
+    with_mlrun: Optional[bool] = None,
     skip_deployed: bool = False,
     image=None,
     base_image=None,
-    commands: list = None,
+    commands: Optional[list] = None,
     secret_name=None,
-    requirements: Union[str, List[str]] = None,
+    requirements: Optional[Union[str, list[str]]] = None,
+    requirements_file: Optional[str] = None,
     mlrun_version_specifier=None,
-    builder_env: dict = None,
+    builder_env: Optional[dict] = None,
     project_object=None,
     overwrite_build_params: bool = False,
-) -> Union[BuildStatus, kfp.dsl.ContainerOp]:
+    extra_args: Optional[str] = None,
+    force_build: bool = False,
+) -> Union[BuildStatus, mlrun_pipelines.models.PipelineNodeWrapper]:
     """deploy ML function, build container with its dependencies
 
-    :param function:        name of the function (in the project) or function object
-    :param with_mlrun:      add the current mlrun package to the container build
-    :param skip_deployed:   skip the build if we already have an image for the function
-    :param image:           target image name/path
-    :param base_image:      base image name/path (commands and source code will be added to it)
-    :param commands:        list of docker build (RUN) commands e.g. ['pip install pandas']
-    :param secret_name:     k8s secret for accessing the docker registry
-    :param requirements:    list of python packages or pip requirements file path, defaults to None
+    :param function:        Name of the function (in the project) or function object
+    :param with_mlrun:      Add the current mlrun package to the container build
+    :param skip_deployed:   Skip the build if we already have an image for the function
+    :param image:           Target image name/path
+    :param base_image:      Base image name/path (commands and source code will be added to it)
+    :param commands:        List of docker build (RUN) commands e.g. ['pip install pandas']
+    :param secret_name:     K8s secret for accessing the docker registry
+    :param requirements:    List of python packages, defaults to None
+    :param requirements_file:    pip requirements file path, defaults to None
     :param mlrun_version_specifier:  which mlrun package version to include (if not current)
     :param builder_env:     Kaniko builder pod env vars dict (for config/credentials)
-                            e.g. builder_env={"GIT_TOKEN": token}, does not work yet in KFP
-    :param project_object:  override the project object to use, will default to the project set in the runtime context.
-    :param builder_env:     Kaniko builder pod env vars dict (for config/credentials)
-                            e.g. builder_env={"GIT_TOKEN": token}, does not work yet in KFP
-    :param overwrite_build_params:  overwrite the function build parameters with the provided ones, or attempt to add
-     to existing parameters
+        e.g. builder_env={"GIT_TOKEN": token}, does not work yet in KFP
+    :param project_object:  Override the project object to use, will default to the project set in the runtime context.
+    :param overwrite_build_params:  Overwrite existing build configuration (currently applies to
+        requirements and commands)
+        * False: The new params are merged with the existing
+        * True: The existing params are replaced by the new ones
+    :param extra_args:  A string containing additional builder arguments in the format of command-line options,
+        e.g. extra_args="--skip-tls-verify --build-arg A=val"
+    :param force_build: Force building the image, even when no changes were made
     """
+    if not overwrite_build_params:
+        # TODO: change overwrite_build_params default to True in 1.8.0
+        warnings.warn(
+            "The `overwrite_build_params` parameter default will change from 'False' to 'True' in 1.8.0.",
+            mlrun.utils.OverwriteBuildParamsWarning,
+        )
+
     engine, function = _get_engine_and_function(function, project_object)
     if function.kind in mlrun.runtimes.RuntimeKinds.nuclio_runtimes():
         raise mlrun.errors.MLRunInvalidArgumentError(
-            "cannot build use deploy_function()"
+            "Cannot build use deploy_function()"
         )
-    if engine == "kfp":
+    if engine == mlrun.common.schemas.workflow.EngineType.KFP:
         if overwrite_build_params:
             function.spec.build.commands = None
-        if requirements:
-            function.with_requirements(requirements)
+        if requirements or requirements_file:
+            function.with_requirements(
+                requirements=requirements,
+                requirements_file=requirements_file,
+                overwrite=True,
+            )
         if commands:
             function.with_commands(commands)
         return function.deploy_step(
@@ -281,20 +325,29 @@ def build_function(
             skip_deployed=skip_deployed,
         )
     else:
-        function.build_config(
-            image=image,
-            base_image=base_image,
-            commands=commands,
-            secret=secret_name,
-            requirements=requirements,
-            overwrite=overwrite_build_params,
-        )
+        # TODO: remove filter once overwrite_build_params default is changed to True in 1.8.0
+        with warnings.catch_warnings():
+            warnings.simplefilter(
+                "ignore", category=mlrun.utils.OverwriteBuildParamsWarning
+            )
+
+            function.build_config(
+                image=image,
+                base_image=base_image,
+                commands=commands,
+                secret=secret_name,
+                requirements=requirements,
+                requirements_file=requirements_file,
+                overwrite=overwrite_build_params,
+                extra_args=extra_args,
+            )
         ready = function.deploy(
             watch=True,
             with_mlrun=with_mlrun,
             skip_deployed=skip_deployed,
             mlrun_version_specifier=mlrun_version_specifier,
             builder_env=builder_env,
+            force_build=force_build,
         )
         # return object with the same outputs as the KFP op (allow using the same pipeline)
         return BuildStatus(ready, {"image": function.spec.image}, function=function)
@@ -303,9 +356,9 @@ def build_function(
 class DeployStatus:
     """returned status from deploy operation"""
 
-    def __init__(self, state, outputs={}, function=None):
+    def __init__(self, state, outputs=None, function=None):
         self.state = state
-        self.outputs = outputs
+        self.outputs = outputs or {}
         self.function = function
 
     def after(self, step):
@@ -318,19 +371,17 @@ class DeployStatus:
 
 def deploy_function(
     function: Union[str, mlrun.runtimes.BaseRuntime],
-    dashboard: str = "",
-    models: list = None,
-    env: dict = None,
-    tag: str = None,
-    verbose: bool = None,
-    builder_env: dict = None,
+    models: Optional[list] = None,
+    env: Optional[dict] = None,
+    tag: Optional[str] = None,
+    verbose: Optional[bool] = None,
+    builder_env: Optional[dict] = None,
     project_object=None,
-    mock: bool = None,
-) -> Union[DeployStatus, kfp.dsl.ContainerOp]:
+    mock: Optional[bool] = None,
+) -> Union[DeployStatus, mlrun_pipelines.models.PipelineNodeWrapper]:
     """deploy real-time (nuclio based) functions
 
     :param function:   name of the function (in the project) or function object
-    :param dashboard:  DEPRECATED. Keep empty to allow auto-detection by MLRun API.
     :param models:     list of model items
     :param env:        dict of extra environment variables
     :param tag:        extra version tag
@@ -344,10 +395,8 @@ def deploy_function(
         raise mlrun.errors.MLRunInvalidArgumentError(
             "deploy is used with real-time functions, for other kinds use build_function()"
         )
-    if engine == "kfp":
-        return function.deploy_step(
-            dashboard=dashboard, models=models, env=env, tag=tag, verbose=verbose
-        )
+    if engine == mlrun.common.schemas.workflow.EngineType.KFP:
+        return function.deploy_step(models=models, env=env, tag=tag, verbose=verbose)
     else:
         if env:
             function.set_envs(env)
@@ -366,9 +415,7 @@ def deploy_function(
                 function=function,
             )
 
-        address = function.deploy(
-            dashboard=dashboard, tag=tag, verbose=verbose, builder_env=builder_env
-        )
+        address = function.deploy(tag=tag, verbose=verbose, builder_env=builder_env)
         # return object with the same outputs as the KFP op (allow using the same pipeline)
         return DeployStatus(
             state=function.status.state,

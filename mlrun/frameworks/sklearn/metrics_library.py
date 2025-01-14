@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 from abc import ABC
-from typing import Dict, List, Union
+from typing import Optional, Union
 
 import sklearn
 from sklearn.preprocessing import LabelBinarizer
@@ -39,15 +39,17 @@ class MetricsLibrary(ABC):
     @classmethod
     def get_metrics(
         cls,
-        metrics: Union[
-            List[Metric],
-            List[SKLearnTypes.MetricEntryType],
-            Dict[str, SKLearnTypes.MetricEntryType],
+        metrics: Optional[
+            Union[
+                list[Metric],
+                list[SKLearnTypes.MetricEntryType],
+                dict[str, SKLearnTypes.MetricEntryType],
+            ]
         ] = None,
         context: mlrun.MLClientCtx = None,
         include_default: bool = True,
         **default_kwargs,
-    ) -> List[Metric]:
+    ) -> list[Metric]:
         """
         Get metrics for a run. The metrics will be taken from the provided metrics / configuration via code, from
         provided configuration via MLRun context and if the 'include_default' is True, from the metric library's
@@ -87,11 +89,11 @@ class MetricsLibrary(ABC):
     def _parse(
         cls,
         metrics: Union[
-            List[Metric],
-            List[SKLearnTypes.MetricEntryType],
-            Dict[str, SKLearnTypes.MetricEntryType],
+            list[Metric],
+            list[SKLearnTypes.MetricEntryType],
+            dict[str, SKLearnTypes.MetricEntryType],
         ],
-    ) -> List[Metric]:
+    ) -> list[Metric]:
         """
         Parse the given metrics by the possible rules of the framework implementing.
 
@@ -116,8 +118,8 @@ class MetricsLibrary(ABC):
 
     @classmethod
     def _from_list(
-        cls, metrics_list: List[Union[Metric, SKLearnTypes.MetricEntryType]]
-    ) -> List[Metric]:
+        cls, metrics_list: list[Union[Metric, SKLearnTypes.MetricEntryType]]
+    ) -> list[Metric]:
         """
         Collect the given metrics configurations from a list. The metrics names will be chosen by the following rules:
 
@@ -143,8 +145,8 @@ class MetricsLibrary(ABC):
 
     @classmethod
     def _from_dict(
-        cls, metrics_dictionary: Dict[str, SKLearnTypes.MetricEntryType]
-    ) -> List[Metric]:
+        cls, metrics_dictionary: dict[str, SKLearnTypes.MetricEntryType]
+    ) -> list[Metric]:
         """
         Collect the given metrics configurations from a dictionary.
 
@@ -165,7 +167,7 @@ class MetricsLibrary(ABC):
     @classmethod
     def _default(
         cls, model: SKLearnTypes.ModelType, y: SKLearnTypes.DatasetType = None
-    ) -> List[Metric]:
+    ) -> list[Metric]:
         """
         Get the default metrics list according to the algorithm functionality.
 
@@ -262,7 +264,7 @@ class MetricsLibrary(ABC):
     def _to_metric_class(
         cls,
         metric_entry: SKLearnTypes.MetricEntryType,
-        metric_name: str = None,
+        metric_name: Optional[str] = None,
     ) -> Metric:
         """
         Create a Metric instance from a user given metric entry.

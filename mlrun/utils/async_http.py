@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,15 +16,16 @@
 import asyncio
 import logging
 import typing
-from typing import List, Optional
+from typing import Optional
 
 import aiohttp
 import aiohttp.http_exceptions
 from aiohttp_retry import ExponentialRetry, RequestParams, RetryClient, RetryOptionsBase
 from aiohttp_retry.client import _RequestContext
 
-from ..config import config
-from ..errors import err_to_str
+from mlrun.config import config
+from mlrun.errors import err_to_str, raise_for_status
+
 from .helpers import logger as mlrun_logger
 
 
@@ -37,22 +38,29 @@ class AsyncClientWithRetry(RetryClient):
         self,
         max_retries: int = config.http_retry_defaults.max_retries,
         retry_backoff_factor: float = config.http_retry_defaults.backoff_factor,
-        retry_on_status_codes: typing.List[
-            int
-        ] = config.http_retry_defaults.status_codes,
+        retry_on_status_codes: list[int] = config.http_retry_defaults.status_codes,
         retry_on_exception: bool = True,
         raise_for_status: bool = True,
-        blacklisted_methods: typing.Optional[typing.List[str]] = None,
-        logger: logging.Logger = None,
+        blacklisted_methods: typing.Optional[list[str]] = None,
+        logger: Optional[logging.Logger] = None,
         *args,
         **kwargs,
     ):
+        # do not retry on PUT / PATCH as they might have side effects (not truly idempotent)
+        blacklisted_methods = (
+            blacklisted_methods
+            if blacklisted_methods is not None
+            else [
+                "POST",
+                "PUT",
+                "PATCH",
+            ]
+        )
         super().__init__(
             *args,
             retry_options=ExponentialRetryOverride(
                 retry_on_exception=retry_on_exception,
-                # do not retry on PUT / PATCH as they might have side effects (not truly idempotent)
-                blacklisted_methods=blacklisted_methods or ["POST", "PUT", "PATCH"],
+                blacklisted_methods=blacklisted_methods,
                 attempts=max_retries,
                 statuses=retry_on_status_codes,
                 factor=retry_backoff_factor,
@@ -64,9 +72,15 @@ class AsyncClientWithRetry(RetryClient):
             **kwargs,
         )
 
+    def methods_blacklist_update_required(self, new_blacklist: str):
+        self._retry_options: ExponentialRetryOverride
+        return set(self._retry_options.blacklisted_methods).difference(
+            set(new_blacklist)
+        )
+
     def _make_requests(
         self,
-        params_list: List[RequestParams],
+        params_list: list[RequestParams],
         retry_options: Optional[RetryOptionsBase] = None,
         raise_for_status: Optional[bool] = None,
     ) -> "_CustomRequestContext":
@@ -92,6 +106,7 @@ class ExponentialRetryOverride(ExponentialRetry):
         # "Connection aborted" and "Connection refused" happen when the server doesn't respond at all.
         ConnectionRefusedError,
         ConnectionAbortedError,
+        ConnectionError,
         # aiohttp exceptions that can be raised during connection establishment
         aiohttp.ClientConnectionError,
         aiohttp.ServerDisconnectedError,
@@ -100,7 +115,7 @@ class ExponentialRetryOverride(ExponentialRetry):
     def __init__(
         self,
         retry_on_exception: bool,
-        blacklisted_methods: typing.List[str],
+        blacklisted_methods: list[str],
         *args,
         **kwargs,
     ):
@@ -134,6 +149,13 @@ class _CustomRequestContext(_RequestContext):
                     params = self._params_list[-1]
 
                 headers = {k: v for k, v in params.headers.items() if v is not None}
+
+                # enrich user agent
+                # will help traceability and debugging
+                headers[aiohttp.hdrs.USER_AGENT] = (
+                    f"{aiohttp.http.SERVER_SOFTWARE} mlrun/{config.version}"
+                )
+
                 response: typing.Optional[
                     aiohttp.ClientResponse
                 ] = await self._request_func(
@@ -166,7 +188,7 @@ class _CustomRequestContext(_RequestContext):
                 last_attempt = current_attempt == self._retry_options.attempts
                 if self._is_status_code_ok(response.status) or last_attempt:
                     if self._raise_for_status:
-                        response.raise_for_status()
+                        raise_for_status(response)
 
                     self._response = response
                     return response
@@ -197,7 +219,13 @@ class _CustomRequestContext(_RequestContext):
                 # if the response is not retryable, return now.
                 # this is done to prevent the retry logic from running on non-idempotent methods such as POST.
                 not_retryable_method = not self._is_method_retryable(params.method)
-                if exhausted_attempts or not_retryable_method:
+                is_connection_error = isinstance(
+                    exc.__cause__, ConnectionRefusedError
+                ) and "[Errno 111] Connect call failed" in str(exc)
+
+                # while method might be blacklisted, we still want to retry on connection errors
+                avoid_retry_on_method = not_retryable_method and not is_connection_error
+                if exhausted_attempts or avoid_retry_on_method:
                     if response:
                         self._response = response
                         return response
@@ -209,7 +237,7 @@ class _CustomRequestContext(_RequestContext):
                 retry_wait = self._retry_options.get_timeout(
                     attempt=current_attempt, response=None
                 )
-                self._logger.debug(
+                self._logger.warning(
                     "Request failed on retryable exception, retrying",
                     retry_wait_secs=retry_wait,
                     method=params.method,
@@ -261,4 +289,12 @@ class _CustomRequestContext(_RequestContext):
             if isinstance(exc, aiohttp.ClientConnectorError):
                 if isinstance(exc.os_error, exc_type):
                     return
-        raise exc
+        if exc.__cause__:
+            # If the cause exception is retriable, return, otherwise, raise the original exception
+            try:
+                self.verify_exception_type(exc.__cause__)
+            except Exception:
+                raise exc
+            return
+        else:
+            raise exc

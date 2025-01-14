@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,14 @@
 #
 from datetime import datetime
 from os import environ
+from typing import Optional
 
 import numpy as np
-from pyspark.sql.types import BooleanType, DoubleType, TimestampType
+import pytz
+from pyspark.sql.functions import to_utc_timestamp
+from pyspark.sql.types import BooleanType, DoubleType
 
+from mlrun.feature_store.retrieval.spark_merger import spark_df_to_pandas
 from mlrun.utils import logger
 
 from .data_types import InferOptions, spark_to_value_type
@@ -32,7 +36,7 @@ def infer_schema_from_df_spark(
     df,
     features,
     entities,
-    timestamp_key: str = None,
+    timestamp_key: Optional[str] = None,
     entity_columns=None,
     options: InferOptions = InferOptions.Null,
 ):
@@ -72,7 +76,7 @@ def get_df_preview_spark(df, preview_lines=20):
     """capture preview data from spark df"""
     df = df.limit(preview_lines)
 
-    result_dict = df.toPandas().to_dict(orient="split")
+    result_dict = spark_df_to_pandas(df).to_dict(orient="split")
     return [result_dict["columns"], *result_dict["data"]]
 
 
@@ -140,9 +144,13 @@ def get_df_stats_spark(df, options, num_bins=20, sample_size=None):
     timestamp_columns = set()
     boolean_columns = set()
     for field in df_after_type_casts.schema.fields:
-        is_timestamp = isinstance(field.dataType, TimestampType)
+        # covers TimestampType and TimestampNTZType, which was added in PySpark 3.4.0
+        is_timestamp = field.dataType.typeName().startswith("timestamp")
         is_boolean = isinstance(field.dataType, BooleanType)
         if is_timestamp:
+            df_after_type_casts = df_after_type_casts.withColumn(
+                field.name, to_utc_timestamp(df_after_type_casts[field.name], "UTC")
+            )
             timestamp_columns.add(field.name)
         if is_boolean:
             boolean_columns.add(field.name)
@@ -210,11 +218,13 @@ def get_df_stats_spark(df, options, num_bins=20, sample_size=None):
         if col in timestamp_columns:
             for stat, val in stats.items():
                 if stat == "mean" or stat in original_type_stats:
-                    stats[stat] = datetime.fromtimestamp(val).isoformat()
+                    stats[stat] = datetime.fromtimestamp(val, tz=pytz.UTC).isoformat()
                 elif stat == "hist":
                     values = stats[stat][1]
                     for i in range(len(values)):
-                        values[i] = datetime.fromtimestamp(values[i]).isoformat()
+                        values[i] = datetime.fromtimestamp(
+                            values[i], tz=pytz.UTC
+                        ).isoformat()
         # for boolean values, keep mean and histogram values numeric (0 to 1 representation)
         if col in boolean_columns:
             for stat, val in stats.items():

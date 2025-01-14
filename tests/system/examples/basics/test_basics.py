@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,10 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pytest
 
-from mlrun import new_task, run_local
+import mlrun
+from mlrun import new_task
 from mlrun.artifacts import PlotArtifact
 from tests.system.base import TestMLRunSystem
 
@@ -43,9 +45,13 @@ class TestBasics(TestMLRunSystem):
             artifact_path=str(self.results_path / "{{run.uid}}"),
         )
 
+    @pytest.mark.smoke
     def test_basics(self):
-        run_object = run_local(
-            self._basics_task, command="training.py", workdir=str(self.assets_path)
+        function = mlrun.new_function(kind="job", command="training.py")
+        run_object = function.run(
+            self._basics_task,
+            workdir=str(self.assets_path),
+            local=True,
         )
         self._logger.debug("Finished running task", run_object=run_object.to_dict())
 
@@ -57,7 +63,7 @@ class TestBasics(TestMLRunSystem):
             uid=run_uid,
             name="demo",
             project=self.project_name,
-            labels={"kind": "", "framework": "sklearn"},
+            labels={"kind": "local", "framework": "sklearn"},
         )
         self._verify_run_spec(
             run_object.to_dict()["spec"],
@@ -82,10 +88,12 @@ class TestBasics(TestMLRunSystem):
         )
 
     def test_basics_hyper_parameters(self):
-        run_object = run_local(
+        function = mlrun.new_function(kind="job", command="training.py")
+        run_object = function.run(
             self._basics_task.with_hyper_params({"p2": [5, 2, 3]}, "min.loss"),
             command="training.py",
             workdir=str(self.assets_path),
+            local=True,
         )
         self._logger.debug("Finished running task", run_object=run_object.to_dict())
 
@@ -107,7 +115,8 @@ class TestBasics(TestMLRunSystem):
         )
 
     def test_inline_code(self):
-        run_object = run_local(self._inline_task.with_params(p1=7))
+        function = mlrun.new_function(name="inline-task", kind="job")
+        run_object = function.run(self._inline_task.with_params(p1=7), local=True)
         self._logger.debug("Finished running task", run_object=run_object.to_dict())
 
         run_uid = run_object.uid()
@@ -116,10 +125,12 @@ class TestBasics(TestMLRunSystem):
         assert run_object.state() == "completed"
 
     def test_inline_code_with_param_file(self):
-        run_object = run_local(
+        function = mlrun.new_function(name="inline-task-with-param-file", kind="job")
+        run_object = function.run(
             self._inline_task.with_param_file(
                 str(self.assets_path / "params.csv"), "max.accuracy"
-            )
+            ),
+            local=True,
         )
         self._logger.debug("Finished running task", run_object=run_object.to_dict())
 

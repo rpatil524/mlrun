@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Dict, List
+
+from typing import Optional
 
 import mlrun
 from mlrun.artifacts import Artifact
@@ -29,7 +30,7 @@ class Producer:
     def __init__(
         self,
         context: mlrun.MLClientCtx = None,
-        plans: List[Plan] = None,
+        plans: Optional[list[Plan]] = None,
     ):
         """
         Initialize a producer with the given plans. The producer will log the produced artifacts using the given
@@ -68,7 +69,7 @@ class Producer:
         return self._context
 
     @property
-    def artifacts(self) -> Dict[str, Artifact]:
+    def artifacts(self) -> dict[str, Artifact]:
         """
         Get the logged artifacts.
 
@@ -92,7 +93,7 @@ class Producer:
         """
         self._context = context
 
-    def set_plans(self, plans: List[Plan]):
+    def set_plans(self, plans: list[Plan]):
         """
         Update the plans of this logger to the given list of plans here.
 

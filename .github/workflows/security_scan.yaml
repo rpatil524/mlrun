@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,13 @@
 
 # Currently supported running against prebuilt images
 name: Security Scan
+run-name: Scanning ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'MLRun image tag to scan (unstable, 1.3.0 or any other tag)'
+        description: 'MLRun image tag to scan (unstable-cache, unstable-cache-13x, 1.3.0-wwwwwwww, 1.3.0 or any other tag)'
         required: false
         default: 'unstable'
       registry:
@@ -30,10 +31,8 @@ on:
       skip_images:
         description: 'Comma separated list of images to skip scanning'
         required: false
-
-        # disabling gpu images for now as scanning them takes more disk space than we can afford
         # test images are not scanned as they are not used in production
-        default: 'test,models-gpu'
+        default: 'test'
       publish_results:
         description: 'Whether to publish results to Github or not (default empty - no publish)'
         required: false
@@ -42,10 +41,21 @@ on:
         description: 'The minimum severity of vulnerabilities to report ("negligible", "low", "medium", "high" and "critical".)'
         required: false
         default: 'medium'
+        type: choice
+        options:
+          - 'negligible'
+          - 'low'
+          - 'medium'
+          - 'high'
+          - 'critical'
       only_fixed:
         description: 'Whether to scan only fixed vulnerabilities ("true" or "false")'
         required: false
         default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   matrix_prep:
@@ -54,7 +64,7 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - id: set-matrix
         uses: ./.github/actions/image-matrix-prep
         with:
@@ -68,7 +78,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix_prep.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Cleanup disk
         run: |
@@ -98,7 +108,7 @@ jobs:
           fi
 
       - name: Scan image
-        uses: anchore/scan-action@v3
+        uses: anchore/scan-action@v6
         id: scan
         with:
           image: ${{ steps.resolve_image_name.outputs.image_name }}
@@ -106,10 +116,11 @@ jobs:
           output-format: ${{ steps.output-format.outputs.format }}
           fail-build: ${{ steps.output-format.outputs.fail_build }}
           severity-cutoff: ${{ github.event.inputs.severity_threshold }}
+          by-cve: true
 
       - name: Upload scan results
         if: github.event.inputs.publish_results != ''
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           category: ${{ matrix.image-name }}-${{ matrix.python-version }})
@@ -118,7 +129,7 @@ jobs:
     name: Scan file system
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Define output format
         id: output-format
@@ -135,7 +146,7 @@ jobs:
           fi
 
       - name: Scan fs
-        uses: anchore/scan-action@v3
+        uses: anchore/scan-action@v6
         id: scan
         with:
           path: "."
@@ -143,10 +154,11 @@ jobs:
           output-format: ${{ steps.output-format.outputs.format }}
           fail-build: ${{ steps.output-format.outputs.fail_build }}
           severity-cutoff: ${{ github.event.inputs.severity_threshold }}
+          by-cve: true
 
       - name: Upload scan results
         if: github.event.inputs.publish_results != ''
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           category: "repository"

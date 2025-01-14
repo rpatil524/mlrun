@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,41 +15,26 @@ import datetime
 import inspect
 import socket
 import time
-import typing
 from os import environ
-from typing import Dict, List, Optional, Union
+from typing import Callable, Optional, Union
 
-from deprecated import deprecated
-from kubernetes.client.rest import ApiException
-from sqlalchemy.orm import Session
-
-import mlrun.api.schemas
+import mlrun.common.schemas
 import mlrun.errors
+import mlrun.k8s_utils
 import mlrun.utils
 import mlrun.utils.regex
-from mlrun.api.db.base import DBInterface
 from mlrun.errors import err_to_str
-from mlrun.runtimes.base import BaseRuntimeHandler
 
 from ..config import config
 from ..execution import MLClientCtx
-from ..k8s_utils import get_k8s_helper
 from ..model import RunObject
 from ..render import ipython_display
-from ..utils import logger, normalize_name, update_in
-from .base import FunctionStatus, RuntimeClassMode
+from ..utils import logger
+from .base import FunctionStatus
 from .kubejob import KubejobRuntime
 from .local import exec_from_params, load_module
-from .pod import KubeResourceSpec, kube_resource_spec_to_pod_spec
-from .utils import RunError, get_func_selector, get_resource_labels, log_std
-
-
-def get_dask_resource():
-    return {
-        "scope": "function",
-        "start": deploy_function,
-        "status": get_obj_status,
-    }
+from .pod import KubeResourceSpec
+from .utils import RunError, get_func_selector, log_std
 
 
 class DaskSpec(KubeResourceSpec):
@@ -107,8 +92,8 @@ class DaskSpec(KubeResourceSpec):
         preemption_mode=None,
         security_context=None,
         clone_target_dir=None,
+        state_thresholds=None,
     ):
-
         super().__init__(
             command=command,
             args=args,
@@ -137,6 +122,7 @@ class DaskSpec(KubeResourceSpec):
             preemption_mode=preemption_mode,
             security_context=security_context,
             clone_target_dir=clone_target_dir,
+            state_thresholds=state_thresholds,
         )
         self.args = args
 
@@ -157,6 +143,8 @@ class DaskSpec(KubeResourceSpec):
         self._worker_resources = self.enrich_resources_with_default_pod_resources(
             "worker_resources", worker_resources
         )
+
+        self.state_thresholds = None  # not supported in dask
 
     @property
     def scheduler_resources(self) -> dict:
@@ -203,9 +191,7 @@ class DaskCluster(KubejobRuntime):
     def __init__(self, spec=None, metadata=None):
         super().__init__(spec, metadata)
         self._cluster = None
-        self.use_remote = not get_k8s_helper(
-            silent=True
-        ).is_running_inside_kubernetes_cluster()
+        self.use_remote = not mlrun.k8s_utils.is_running_inside_kubernetes_cluster()
         self.spec.build.base_image = self.spec.build.base_image or "daskdev/dask:latest"
 
     @property
@@ -246,56 +232,56 @@ class DaskCluster(KubejobRuntime):
             if db_func and "status" in db_func:
                 self.status = db_func["status"]
                 if self.kfp:
-                    logger.info(f"dask status: {db_func['status']}")
+                    logger.info(f"Dask status: {db_func['status']}")
                 return "scheduler_address" in db_func["status"]
 
         return False
 
     def _start(self, watch=True):
-        if self._is_remote_api():
-            self.try_auto_mount_based_on_config()
-            self._fill_credentials()
-            db = self._get_db()
-            if not self.is_deployed():
-                raise RunError(
-                    "function image is not built/ready, use .deploy()"
-                    " method first, or set base dask image (daskdev/dask:latest)"
-                )
+        db = self._get_db()
+        if not self._is_remote_api():
+            self._cluster = db.start_function(function=self)
+            return
 
-            self.save(versioned=False)
-            background_task = db.remote_start(self._function_uri())
-            if watch:
-                now = datetime.datetime.utcnow()
-                timeout = now + datetime.timedelta(minutes=10)
-                while now < timeout:
-                    background_task = db.get_project_background_task(
-                        background_task.metadata.project, background_task.metadata.name
-                    )
+        self.try_auto_mount_based_on_config()
+        self._fill_credentials()
+        if not self.is_deployed():
+            raise RunError(
+                "Function image is not built/ready, use .deploy()"
+                " method first, or set base dask image (daskdev/dask:latest)"
+            )
+
+        self.save(versioned=False)
+        background_task = db.start_function(func_url=self._function_uri())
+        if watch:
+            now = datetime.datetime.utcnow()
+            timeout = now + datetime.timedelta(minutes=10)
+            while now < timeout:
+                background_task = db.get_project_background_task(
+                    background_task.metadata.project, background_task.metadata.name
+                )
+                if (
+                    background_task.status.state
+                    in mlrun.common.schemas.BackgroundTaskState.terminal_states()
+                ):
                     if (
                         background_task.status.state
-                        in mlrun.api.schemas.BackgroundTaskState.terminal_states()
+                        == mlrun.common.schemas.BackgroundTaskState.failed
                     ):
-                        if (
-                            background_task.status.state
-                            == mlrun.api.schemas.BackgroundTaskState.failed
-                        ):
-                            raise mlrun.errors.MLRunRuntimeError(
-                                "Failed bringing up dask cluster"
-                            )
-                        else:
-                            function = db.get_function(
-                                self.metadata.name,
-                                self.metadata.project,
-                                self.metadata.tag,
-                            )
-                            if function and function.get("status"):
-                                self.status = function.get("status")
-                            return
-                    time.sleep(5)
-                    now = datetime.datetime.utcnow()
-        else:
-            self._cluster = deploy_function(self)
-            self.save(versioned=False)
+                        raise mlrun.errors.MLRunRuntimeError(
+                            "Failed bringing up dask cluster"
+                        )
+                    else:
+                        function = db.get_function(
+                            self.metadata.name,
+                            self.metadata.project,
+                            self.metadata.tag,
+                        )
+                        if function and function.get("status"):
+                            self.status = function.get("status")
+                        return
+                time.sleep(5)
+                now = datetime.datetime.utcnow()
 
     def close(self, running=True):
         from dask.distributed import default_client
@@ -311,13 +297,8 @@ class DaskCluster(KubejobRuntime):
     def get_status(self):
         meta = self.metadata
         selector = get_func_selector(meta.project, meta.name, meta.tag)
-        if self._is_remote_api():
-            db = self._get_db()
-            return db.remote_status(meta.project, meta.name, self.kind, selector)
-
-        status = get_obj_status(selector)
-        print(status)
-        return status
+        db = self._get_db()
+        return db.function_status(meta.project, meta.name, self.kind, selector)
 
     def cluster(self):
         return self._cluster
@@ -332,7 +313,7 @@ class DaskCluster(KubejobRuntime):
             if self.spec.service_type == "NodePort":
                 dash = f"{config.remote_host}:{self.status.node_ports.get('dashboard')}"
             else:
-                logger.info("to get a dashboard link, use NodePort service_type")
+                logger.info("To get a dashboard link, use NodePort service_type")
 
         return addr, dash
 
@@ -346,17 +327,13 @@ class DaskCluster(KubejobRuntime):
 
         if self.status.scheduler_address:
             addr, dash = self._remote_addresses()
-            logger.info(f"trying dask client at: {addr}")
+            logger.info(f"Trying dask client at: {addr}")
             try:
                 client = Client(addr)
             except OSError as exc:
                 logger.warning(
-                    f"remote scheduler at {addr} not ready, will try to restart {err_to_str(exc)}"
+                    f"Remote scheduler at {addr} not ready, will try to restart {err_to_str(exc)}"
                 )
-
-                # todo: figure out if test is needed
-                # if self._is_remote_api():
-                #     raise Exception('no access to Kubernetes API')
 
                 status = self.get_status()
                 if status != "running":
@@ -365,7 +342,7 @@ class DaskCluster(KubejobRuntime):
                 client = Client(addr)
 
             logger.info(
-                f"using remote dask scheduler ({self.status.cluster_name}) at: {addr}"
+                f"Using remote dask scheduler ({self.status.cluster_name}) at: {addr}"
             )
             if dash:
                 ipython_display(
@@ -386,8 +363,9 @@ class DaskCluster(KubejobRuntime):
         skip_deployed=False,
         is_kfp=False,
         mlrun_version_specifier=None,
-        builder_env: dict = None,
+        builder_env: Optional[dict] = None,
         show_on_failure: bool = False,
+        force_build: bool = False,
     ):
         """deploy function, build container with dependencies
 
@@ -399,8 +377,9 @@ class DaskCluster(KubejobRuntime):
         :param builder_env:             Kaniko builder pod env vars dict (for config/credentials)
                                         e.g. builder_env={"GIT_TOKEN": token}
         :param show_on_failure:         show logs only in case of build failure
+        :param force_build:             force building the image, even when no changes were made
 
-        :return True if the function is ready (deployed)
+        :return:                        True if the function is ready (deployed)
         """
         return super().deploy(
             watch,
@@ -410,17 +389,8 @@ class DaskCluster(KubejobRuntime):
             mlrun_version_specifier=mlrun_version_specifier,
             builder_env=builder_env,
             show_on_failure=show_on_failure,
+            force_build=force_build,
         )
-
-    # TODO: Remove in 1.5.0
-    @deprecated(
-        version="1.3.0",
-        reason="'Dask gpus' will be removed in 1.5.0, use 'with_scheduler_limits' / 'with_worker_limits' instead",
-        category=FutureWarning,
-    )
-    def gpus(self, gpus, gpu_type="nvidia.com/gpu"):
-        update_in(self.spec.scheduler_resources, ["limits", gpu_type], gpus)
-        update_in(self.spec.worker_resources, ["limits", gpu_type], gpus)
 
     def with_limits(
         self,
@@ -436,9 +406,9 @@ class DaskCluster(KubejobRuntime):
 
     def with_scheduler_limits(
         self,
-        mem: str = None,
-        cpu: str = None,
-        gpus: int = None,
+        mem: Optional[str] = None,
+        cpu: Optional[str] = None,
+        gpus: Optional[int] = None,
         gpu_type: str = "nvidia.com/gpu",
         patch: bool = False,
     ):
@@ -452,9 +422,9 @@ class DaskCluster(KubejobRuntime):
 
     def with_worker_limits(
         self,
-        mem: str = None,
-        cpu: str = None,
-        gpus: int = None,
+        mem: Optional[str] = None,
+        cpu: Optional[str] = None,
+        gpus: Optional[int] = None,
         gpu_type: str = "nvidia.com/gpu",
         patch: bool = False,
     ):
@@ -472,7 +442,7 @@ class DaskCluster(KubejobRuntime):
         )
 
     def with_scheduler_requests(
-        self, mem: str = None, cpu: str = None, patch: bool = False
+        self, mem: Optional[str] = None, cpu: Optional[str] = None, patch: bool = False
     ):
         """
         set scheduler pod resources requests
@@ -481,7 +451,7 @@ class DaskCluster(KubejobRuntime):
         self.spec._verify_and_set_requests("scheduler_resources", mem, cpu, patch=patch)
 
     def with_worker_requests(
-        self, mem: str = None, cpu: str = None, patch: bool = False
+        self, mem: Optional[str] = None, cpu: Optional[str] = None, patch: bool = False
     ):
         """
         set worker pod resources requests
@@ -489,11 +459,80 @@ class DaskCluster(KubejobRuntime):
         """
         self.spec._verify_and_set_requests("worker_resources", mem, cpu, patch=patch)
 
-    def _run(self, runobj: RunObject, execution):
+    def set_state_thresholds(
+        self,
+        state_thresholds: dict[str, str],
+        patch: bool = True,
+    ):
+        raise NotImplementedError(
+            "State thresholds is not supported for Dask runtime yet, use spec.scheduler_timeout instead.",
+        )
 
+    def run(
+        self,
+        runspec: Optional[
+            Union["mlrun.run.RunTemplate", "mlrun.run.RunObject", dict]
+        ] = None,
+        handler: Optional[Union[str, Callable]] = None,
+        name: Optional[str] = "",
+        project: Optional[str] = "",
+        params: Optional[dict] = None,
+        inputs: Optional[dict[str, str]] = None,
+        out_path: Optional[str] = "",
+        workdir: Optional[str] = "",
+        artifact_path: Optional[str] = "",
+        watch: Optional[bool] = True,
+        schedule: Optional[Union[str, mlrun.common.schemas.ScheduleCronTrigger]] = None,
+        hyperparams: Optional[dict[str, list]] = None,
+        hyper_param_options: Optional[mlrun.model.HyperParamOptions] = None,
+        verbose: Optional[bool] = None,
+        scrape_metrics: Optional[bool] = None,
+        local: Optional[bool] = False,
+        local_code_path: Optional[str] = None,
+        auto_build: Optional[bool] = None,
+        param_file_secrets: Optional[dict[str, str]] = None,
+        notifications: Optional[list[mlrun.model.Notification]] = None,
+        returns: Optional[list[Union[str, dict[str, str]]]] = None,
+        state_thresholds: Optional[dict[str, int]] = None,
+        reset_on_run: Optional[bool] = None,
+        **launcher_kwargs,
+    ) -> RunObject:
+        if state_thresholds:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "State thresholds is not supported for Dask runtime yet, use spec.scheduler_timeout instead."
+            )
+        return super().run(
+            runspec=runspec,
+            handler=handler,
+            name=name,
+            project=project,
+            params=params,
+            inputs=inputs,
+            out_path=out_path,
+            workdir=workdir,
+            artifact_path=artifact_path,
+            watch=watch,
+            schedule=schedule,
+            hyperparams=hyperparams,
+            hyper_param_options=hyper_param_options,
+            verbose=verbose,
+            scrape_metrics=scrape_metrics,
+            local=local,
+            local_code_path=local_code_path,
+            auto_build=auto_build,
+            param_file_secrets=param_file_secrets,
+            notifications=notifications,
+            returns=returns,
+            state_thresholds=state_thresholds,
+            **launcher_kwargs,
+        )
+
+    def _run(self, runobj: RunObject, execution):
         handler = runobj.spec.handler
         self._force_handler(handler)
 
+        # TODO: investigate if the following instructions could overwrite the environment on any MLRun API Pod
+        # Such action could result on race conditions against other runtimes and MLRun itself
         extra_env = self._generate_runtime_env(runobj)
         environ.update(extra_env)
 
@@ -509,356 +548,15 @@ class DaskCluster(KubejobRuntime):
                     "specified handler (string) without command "
                     "(py file path), specify command or use handler pointer"
                 )
-            handler = load_module(self.spec.command, handler, context=context)
+            # Do not embed the module in system as it is not persistent with the dask cluster
+            handler = load_module(
+                self.spec.command,
+                handler,
+                context=context,
+                embed_in_sys=False,
+            )
         client = self.client
         setattr(context, "dask_client", client)
         sout, serr = exec_from_params(handler, runobj, context)
         log_std(self._db_conn, runobj, sout, serr, skip=self.is_child, show=False)
         return context.to_dict()
-
-
-def deploy_function(
-    function: DaskCluster,
-    secrets=None,
-    client_version: str = None,
-    client_python_version: str = None,
-):
-    _validate_dask_related_libraries_installed()
-
-    scheduler_pod, worker_pod, function, namespace = enrich_dask_cluster(
-        function, secrets, client_version, client_python_version
-    )
-    return initialize_dask_cluster(scheduler_pod, worker_pod, function, namespace)
-
-
-def initialize_dask_cluster(scheduler_pod, worker_pod, function, namespace):
-    import dask
-    import dask_kubernetes
-
-    spec, meta = function.spec, function.metadata
-
-    svc_temp = dask.config.get("kubernetes.scheduler-service-template")
-    if spec.service_type or spec.node_port:
-        if spec.node_port:
-            spec.service_type = "NodePort"
-            svc_temp["spec"]["ports"][1]["nodePort"] = spec.node_port
-        update_in(svc_temp, "spec.type", spec.service_type)
-
-    norm_name = normalize_name(meta.name)
-    dask.config.set(
-        {
-            "kubernetes.scheduler-service-template": svc_temp,
-            "kubernetes.name": "mlrun-" + norm_name + "-{uuid}",
-        }
-    )
-
-    cluster = dask_kubernetes.KubeCluster(
-        worker_pod,
-        scheduler_pod_template=scheduler_pod,
-        deploy_mode="remote",
-        namespace=namespace,
-        idle_timeout=spec.scheduler_timeout,
-    )
-
-    logger.info(f"cluster {cluster.name} started at {cluster.scheduler_address}")
-
-    function.status.scheduler_address = cluster.scheduler_address
-    function.status.cluster_name = cluster.name
-    if spec.service_type == "NodePort":
-        ports = cluster.scheduler.service.spec.ports
-        function.status.node_ports = {
-            "scheduler": ports[0].node_port,
-            "dashboard": ports[1].node_port,
-        }
-
-    if spec.replicas:
-        cluster.scale(spec.replicas)
-    else:
-        cluster.adapt(minimum=spec.min_replicas, maximum=spec.max_replicas)
-
-    return cluster
-
-
-def enrich_dask_cluster(
-    function, secrets, client_version: str = None, client_python_version: str = None
-):
-    from dask.distributed import Client, default_client  # noqa: F401
-    from dask_kubernetes import KubeCluster, make_pod_spec  # noqa: F401
-    from kubernetes import client
-
-    # Is it possible that the function will not have a project at this point?
-    if function.metadata.project:
-        function._add_secrets_to_spec_before_running(project=function.metadata.project)
-
-    spec = function.spec
-    meta = function.metadata
-    spec.remote = True
-
-    image = (
-        function.full_image_path(
-            client_version=client_version, client_python_version=client_python_version
-        )
-        # TODO: we might never enter here, since running a function requires defining an image
-        or "daskdev/dask:latest"
-    )
-    env = spec.env
-    namespace = meta.namespace or config.namespace
-    if spec.extra_pip:
-        env.append(spec.extra_pip)
-
-    pod_labels = get_resource_labels(function, scrape_metrics=config.scrape_metrics)
-    # TODO: 'dask-worker' is deprecated, new dask CLI was introduced in 2022.10.0.
-    #  Upgrade when we drop python 3.7 support and use 'dask worker' instead
-    worker_args = ["dask-worker", "--nthreads", str(spec.nthreads)]
-    memory_limit = spec.worker_resources.get("limits", {}).get("memory")
-    if memory_limit:
-        worker_args.extend(["--memory-limit", str(memory_limit)])
-    if spec.args:
-        worker_args.extend(spec.args)
-    # TODO: 'dask-scheduler' is deprecated, new dask CLI was introduced in 2022.10.0.
-    #  Upgrade when we drop python 3.7 support and use 'dask scheduler' instead
-    scheduler_args = ["dask-scheduler"]
-
-    container_kwargs = {
-        "name": "base",
-        "image": image,
-        "env": env,
-        "image_pull_policy": spec.image_pull_policy,
-        "volume_mounts": spec.volume_mounts,
-    }
-    scheduler_container = client.V1Container(
-        resources=spec.scheduler_resources, args=scheduler_args, **container_kwargs
-    )
-    worker_container = client.V1Container(
-        resources=spec.worker_resources, args=worker_args, **container_kwargs
-    )
-
-    scheduler_pod_spec = kube_resource_spec_to_pod_spec(spec, scheduler_container)
-    worker_pod_spec = kube_resource_spec_to_pod_spec(spec, worker_container)
-    for pod_spec in [scheduler_pod_spec, worker_pod_spec]:
-        if spec.image_pull_secret:
-            pod_spec.image_pull_secrets = [
-                client.V1LocalObjectReference(name=spec.image_pull_secret)
-            ]
-
-    scheduler_pod = client.V1Pod(
-        metadata=client.V1ObjectMeta(namespace=namespace, labels=pod_labels),
-        # annotations=meta.annotation),
-        spec=scheduler_pod_spec,
-    )
-    worker_pod = client.V1Pod(
-        metadata=client.V1ObjectMeta(namespace=namespace, labels=pod_labels),
-        # annotations=meta.annotation),
-        spec=worker_pod_spec,
-    )
-    return scheduler_pod, worker_pod, function, namespace
-
-
-def _validate_dask_related_libraries_installed():
-    try:
-        import dask  # noqa: F401
-        from dask.distributed import Client, default_client  # noqa: F401
-        from dask_kubernetes import KubeCluster, make_pod_spec  # noqa: F401
-        from kubernetes import client  # noqa: F401
-    except ImportError as exc:
-        print(
-            "missing dask or dask_kubernetes, please run "
-            '"pip install dask distributed dask_kubernetes", %s',
-            exc,
-        )
-        raise exc
-
-
-def get_obj_status(selector=None, namespace=None):
-    if selector is None:
-        selector = []
-
-    k8s = get_k8s_helper()
-    namespace = namespace or config.namespace
-    selector = ",".join(["dask.org/component=scheduler"] + selector)
-    pods = k8s.list_pods(namespace, selector=selector)
-    status = ""
-    for pod in pods:
-        status = pod.status.phase.lower()
-        if status == "running":
-            cluster = pod.metadata.labels.get("dask.org/cluster-name")
-            logger.info(
-                f"found running dask function {pod.metadata.name}, cluster={cluster}"
-            )
-            return status
-        logger.info(
-            f"found dask function {pod.metadata.name} in non ready state ({status})"
-        )
-    return status
-
-
-class DaskRuntimeHandler(BaseRuntimeHandler):
-    kind = "dask"
-    class_modes = {RuntimeClassMode.run: "dask"}
-
-    # Dask runtime resources are per function (and not per run).
-    # It means that monitoring runtime resources state doesn't say anything about the run state.
-    # Therefore dask run monitoring is done completely by the SDK, so overriding the monitoring method with no logic
-    def monitor_runs(
-        self, db: DBInterface, db_session: Session, leader_session: Optional[str] = None
-    ):
-        return
-
-    @staticmethod
-    def _get_object_label_selector(object_id: str) -> str:
-        return f"mlrun/function={object_id}"
-
-    @staticmethod
-    def resolve_object_id(
-        run: dict,
-    ) -> typing.Optional[str]:
-        """
-        Resolves the object ID from the run object.
-        In dask runtime, the object ID is the function name.
-        :param run: run object
-        :return: function name
-        """
-
-        function = run.get("spec", {}).get("function", None)
-        if function:
-
-            # a dask run's function field is in the format <project-name>/<function-name>@<run-uid>
-            # we only want the function name
-            project_and_function = function.split("@")[0]
-            return project_and_function.split("/")[-1]
-
-        return None
-
-    def _enrich_list_resources_response(
-        self,
-        response: Union[
-            mlrun.api.schemas.RuntimeResources,
-            mlrun.api.schemas.GroupedByJobRuntimeResourcesOutput,
-            mlrun.api.schemas.GroupedByProjectRuntimeResourcesOutput,
-        ],
-        namespace: str,
-        label_selector: str = None,
-        group_by: Optional[mlrun.api.schemas.ListRuntimeResourcesGroupByField] = None,
-    ) -> Union[
-        mlrun.api.schemas.RuntimeResources,
-        mlrun.api.schemas.GroupedByJobRuntimeResourcesOutput,
-        mlrun.api.schemas.GroupedByProjectRuntimeResourcesOutput,
-    ]:
-        """
-        Handling listing service resources
-        """
-        enrich_needed = self._validate_if_enrich_is_needed_by_group_by(group_by)
-        if not enrich_needed:
-            return response
-        k8s_helper = get_k8s_helper()
-        services = k8s_helper.v1api.list_namespaced_service(
-            namespace, label_selector=label_selector
-        )
-        service_resources = []
-        for service in services.items:
-            service_resources.append(
-                mlrun.api.schemas.RuntimeResource(
-                    name=service.metadata.name, labels=service.metadata.labels
-                )
-            )
-        return self._enrich_service_resources_in_response(
-            response, service_resources, group_by
-        )
-
-    def _build_output_from_runtime_resources(
-        self,
-        response: Union[
-            mlrun.api.schemas.RuntimeResources,
-            mlrun.api.schemas.GroupedByJobRuntimeResourcesOutput,
-            mlrun.api.schemas.GroupedByProjectRuntimeResourcesOutput,
-        ],
-        runtime_resources_list: List[mlrun.api.schemas.RuntimeResources],
-        group_by: Optional[mlrun.api.schemas.ListRuntimeResourcesGroupByField] = None,
-    ):
-        enrich_needed = self._validate_if_enrich_is_needed_by_group_by(group_by)
-        if not enrich_needed:
-            return response
-        service_resources = []
-        for runtime_resources in runtime_resources_list:
-            if runtime_resources.service_resources:
-                service_resources += runtime_resources.service_resources
-        return self._enrich_service_resources_in_response(
-            response, service_resources, group_by
-        )
-
-    def _validate_if_enrich_is_needed_by_group_by(
-        self,
-        group_by: Optional[mlrun.api.schemas.ListRuntimeResourcesGroupByField] = None,
-    ) -> bool:
-        # Dask runtime resources are per function (and not per job) therefore, when grouping by job we're simply
-        # omitting the dask runtime resources
-        if group_by == mlrun.api.schemas.ListRuntimeResourcesGroupByField.job:
-            return False
-        elif group_by == mlrun.api.schemas.ListRuntimeResourcesGroupByField.project:
-            return True
-        elif group_by is not None:
-            raise NotImplementedError(
-                f"Provided group by field is not supported. group_by={group_by}"
-            )
-        return True
-
-    def _enrich_service_resources_in_response(
-        self,
-        response: Union[
-            mlrun.api.schemas.RuntimeResources,
-            mlrun.api.schemas.GroupedByJobRuntimeResourcesOutput,
-            mlrun.api.schemas.GroupedByProjectRuntimeResourcesOutput,
-        ],
-        service_resources: List[mlrun.api.schemas.RuntimeResource],
-        group_by: Optional[mlrun.api.schemas.ListRuntimeResourcesGroupByField] = None,
-    ):
-        if group_by == mlrun.api.schemas.ListRuntimeResourcesGroupByField.project:
-            for service_resource in service_resources:
-                self._add_resource_to_grouped_by_project_resources_response(
-                    response, "service_resources", service_resource
-                )
-        else:
-            response.service_resources = service_resources
-        return response
-
-    def _delete_extra_resources(
-        self,
-        db: DBInterface,
-        db_session: Session,
-        namespace: str,
-        deleted_resources: List[Dict],
-        label_selector: str = None,
-        force: bool = False,
-        grace_period: int = None,
-    ):
-        """
-        Handling services deletion
-        """
-        if grace_period is None:
-            grace_period = config.runtime_resources_deletion_grace_period
-        service_names = []
-        for pod_dict in deleted_resources:
-            dask_component = (
-                pod_dict["metadata"].get("labels", {}).get("dask.org/component")
-            )
-            cluster_name = (
-                pod_dict["metadata"].get("labels", {}).get("dask.org/cluster-name")
-            )
-            if dask_component == "scheduler" and cluster_name:
-                service_names.append(cluster_name)
-
-        k8s_helper = get_k8s_helper()
-        services = k8s_helper.v1api.list_namespaced_service(
-            namespace, label_selector=label_selector
-        )
-        for service in services.items:
-            try:
-                if force or service.metadata.name in service_names:
-                    k8s_helper.v1api.delete_namespaced_service(
-                        service.metadata.name, namespace
-                    )
-                    logger.info(f"Deleted service: {service.metadata.name}")
-            except ApiException as exc:
-                # ignore error if service is already removed
-                if exc.status != 404:
-                    raise

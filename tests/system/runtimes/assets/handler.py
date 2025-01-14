@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ def my_func(context, p1: int = 1, p2="a-string"):
     print(f"Run: {context.name} (uid={context.uid})")
     print(f"Params: p1={p1}, p2={p2}")
     context.logger.info("running function")
+
+    context.log_artifact("test", body=str(p1))
 
     # RUN some useful code e.g. ML training, data prep, etc.
 

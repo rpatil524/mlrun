@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,13 +18,10 @@ from datetime import datetime
 from http import HTTPStatus
 from os import environ
 from pathlib import Path
-from subprocess import PIPE, run
+from subprocess import run
 from sys import executable, platform, stderr
 from time import monotonic, sleep
 from urllib.request import URLError, urlopen
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 tests_root_directory = Path(__file__).absolute().parent
 results = tests_root_directory / "test_results"
@@ -40,9 +37,7 @@ root_path = str(Path(tests_root_directory).parent)
 examples_path = Path(tests_root_directory).parent.joinpath("examples")
 pytest_plugins = ["tests.common_fixtures"]
 
-# import package stuff after setting env vars so it will take effect
-from mlrun.api.db.sqldb.db import run_time_fmt  # noqa: E402
-from mlrun.api.db.sqldb.models import Base  # noqa: E402
+run_time_fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 def check_docker():
@@ -60,6 +55,11 @@ in_docker = check_docker()
 
 # This must be *after* environment changes above
 from mlrun import RunObject, RunTemplate  # noqa
+from mlrun.utils import FormatterKinds, logger, resolve_formatter_by_kind  # noqa
+
+logger.get_handler("default").setFormatter(
+    resolve_formatter_by_kind(FormatterKinds.HUMAN_EXTENDED)()
+)
 
 
 def tag_test(spec: RunTemplate, name) -> RunTemplate:
@@ -122,15 +122,9 @@ def freeze(f, **kwargs):
     return wrapper
 
 
-def init_sqldb(dsn):
-    engine = create_engine(dsn)
-    Base.metadata.create_all(bind=engine)
-    return sessionmaker(bind=engine)
-
-
 def exec_mlrun(args, cwd=None, op="run"):
     cmd = [executable, "-m", "mlrun", op] + args
-    out = run(cmd, stdout=PIPE, stderr=PIPE, cwd=cwd)
+    out = run(cmd, capture_output=True, cwd=cwd)
     if out.returncode != 0:
         print(out.stderr.decode("utf-8"), file=stderr)
         print(out.stdout.decode("utf-8"), file=stderr)
@@ -143,7 +137,7 @@ class MockSpecificCalls:
     def __init__(
         self,
         original_function: typing.Callable,
-        call_indexes_to_mock: typing.List[int],
+        call_indexes_to_mock: list[int],
         return_value: typing.Any,
     ):
         self.original_function = original_function

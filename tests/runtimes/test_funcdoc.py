@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ from tests.conftest import tests_root_directory
 
 def load_rst_cases(name):
     with open(tests_root_directory / "runtimes" / name) as fp:
-        data = yaml.load(fp)
+        data = yaml.safe_load(fp)
 
     for i, case in enumerate(data):
         name = case.get("name", "")
@@ -50,33 +50,14 @@ def ast_func(code):
     return funcs[0]
 
 
-def eval_func(code):
-    out = {}
-    exec(code, None, out)
-    funcs = [obj for obj in out.values() if callable(obj)]
-    assert len(funcs) == 1, f"more than one function in:\n{code}"
-    return funcs[0]
-
-
-info_handlers = [
-    (funcdoc.func_info, eval_func),
-    (funcdoc.ast_func_info, ast_func),
-]
-
-
 def load_info_cases():
     with open(tests_root_directory / "runtimes" / "info_cases.yml") as fp:
-        cases = yaml.load(fp)
+        cases = yaml.safe_load(fp)
 
     for case in cases:
-        for info_fn, conv in info_handlers:
-            obj = conv(case["code"])
-            tid = f'{case["id"]}-{info_fn.__name__}'
-            expected = case["expected"].copy()
-            # No line info in evaled functions
-            if info_fn is funcdoc.func_info:
-                expected["lineno"] = -1
-            yield pytest.param(info_fn, obj, expected, id=tid)
+        obj = ast_func(case["code"])
+        expected = case["expected"].copy()
+        yield pytest.param(funcdoc.ast_func_info, obj, expected, id=case["id"])
 
 
 @pytest.mark.parametrize("info_fn, obj, expected", load_info_cases())
@@ -98,16 +79,18 @@ find_handlers_expected = [
     {
         "name": "inc",
         "doc": "",
-        "return": funcdoc.param_dict(),
-        "params": [funcdoc.param_dict("n")],
+        "return": funcdoc.param_dict(type=None, default=None),
+        "params": [funcdoc.param_dict("n", default=None)],
         "lineno": 6,
+        "has_varargs": False,
+        "has_kwargs": False,
     },
 ]
 
 
 def test_find_handlers():
     funcs = funcdoc.find_handlers(find_handlers_code)
-    assert find_handlers_expected == funcs
+    assert funcs == find_handlers_expected
 
 
 ast_code_cases = [
@@ -139,8 +122,66 @@ def test_ast_none():
     def fn() -> None:
         pass
     """
-    fn = ast.parse(dedent(code)).body[0]
+    fn: ast.FunctionDef = ast.parse(dedent(code)).body[0]
     funcdoc.ast_func_info(fn)
+
+
+@pytest.mark.parametrize(
+    "func_code,expected_has_varargs,expected_has_kwargs",
+    [
+        (
+            """
+    def fn(p1,p2,*args,**kwargs) -> None:
+        pass
+    """,
+            True,
+            True,
+        ),
+        (
+            """
+    def fn(p1,p2,*args) -> None:
+        pass
+    """,
+            True,
+            False,
+        ),
+        (
+            """
+    def fn(p1,p2,**kwargs) -> None:
+        pass
+    """,
+            False,
+            True,
+        ),
+        (
+            """
+    def fn(p1,p2) -> None:
+        pass
+    """,
+            False,
+            False,
+        ),
+        (
+            """
+    def fn(p1,p2,**something) -> None:
+        pass
+    """,
+            False,
+            True,
+        ),
+    ],
+)
+def test_ast_func_info_with_kwargs_and_args(
+    func_code, expected_has_varargs, expected_has_kwargs
+):
+    fn: ast.FunctionDef = ast.parse(dedent(func_code)).body[0]
+    func_info = funcdoc.ast_func_info(fn)
+    assert func_info["has_varargs"] == expected_has_varargs
+    assert func_info["has_kwargs"] == expected_has_kwargs
+
+    func = funcdoc.find_handlers(dedent(func_code))[0]
+    assert func["has_varargs"] == expected_has_varargs
+    assert func["has_kwargs"] == expected_has_kwargs
 
 
 def test_ast_compound():
@@ -150,7 +191,7 @@ def test_ast_compound():
 
         # collect the types of the function parameters
         # assumes each param is in a new line for simplicity
-        for line in code.splitlines()[3:12]:
+        for line in code.splitlines()[3:15]:
             if ":" not in line:
                 param_types.append(None)
                 continue
@@ -200,3 +241,46 @@ def test_annotate_mod():
     handlers = funcdoc.find_handlers(dedent(code))
     param = handlers[0]["params"][0]
     assert param["type"] == "DataItem"
+
+
+@pytest.mark.parametrize(
+    "func_code,expected_return_type",
+    [
+        pytest.param(
+            """
+    def fn1():
+        pass
+    """,
+            None,
+            id="no-hint",
+        ),
+        pytest.param(
+            """
+    def fn2() -> str:
+        pass
+    """,
+            "str",
+            id="str",
+        ),
+        pytest.param(
+            """
+    def fn3() -> Union[str, pd.DataFrame]:
+        pass
+    """,
+            "Union[str, pd.DataFrame]",
+            id="union",
+        ),
+        pytest.param(
+            """
+    def fn4() -> None:
+        pass
+    """,
+            "None",
+            id="None",
+        ),
+    ],
+)
+def test_return_types(func_code, expected_return_type):
+    fn: ast.FunctionDef = ast.parse(dedent(func_code)).body[0]
+    func_info = funcdoc.ast_func_info(fn)
+    assert func_info["return"]["type"] == expected_return_type

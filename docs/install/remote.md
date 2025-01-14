@@ -3,13 +3,16 @@
 
 You can write your code on a local machine while running your functions on a remote cluster. This tutorial explains how to set this up.
 
+This release of MLRun supports only Python 3.9 for both the server and the client. 
+
 **In this section**
 - [Prerequisites](#prerequisites)
-- [Set up client environment](#set-up-client-environment)
+- [Set up a Python 3.9 client environment](#set-up-a-python-39-client-environment)
 - [Configure remote environment](#configure-remote-environment)
    - [Using `mlrun config set` command in MLRun CLI](#using-mlrun-config-set-command-in-mlrun-cli)
-   - [Using `mlrun.set_environment` command in MLRun SDK](#using-mlrun-set-environment-command-in-mlrun-sdk)
-   - [Using your IDE (e.g PyCharm or VSCode)](#using-your-ide-e-g-pycharm-or-vscode)
+   - [Using `mlrun.set_environment` command in MLRun SDK](#using-mlrun-config-set-command-in-mlrun-cli)
+   - [Using your IDE (e.g. PyCharm or VSCode)](#using-your-ide-eg-pycharm-or-vscode)
+- [Setting up a dark site](#setting-up-a-dark-site)
 
 <a id="prerequisites"></a>
 ## Prerequisites
@@ -17,10 +20,20 @@ You can write your code on a local machine while running your functions on a rem
 Before you begin, ensure that the following prerequisites are met:
 
 Applications:
-- Python 3.9 
+- Python 3.9
 - Recommended pip 22.x+
 
-## Set up client environment 
+The MLRun server is based on a Python 3.9 environment. It's recommended to move the client to a Python 3.9 environment as well. 
+
+For a Python 3.7 environment for platform versions up to and including v3.5.2, see [Set up a Python 3.7 client environment](../change-log/index.md#set-up-a-python-37-client-environment-iguazio-versions-up-to-and-including-v352).
+
+## MLRun client supported OS
+The MLRun client supports:
+- Linux
+- Mac
+- Windows via WSL
+
+## Set up a Python 3.9 client environment
 
 1.  **Basic** <br> 
 Run ```pip install mlrun```
@@ -29,6 +42,14 @@ Run ```pip install mlrun```
 ```{admonition} Note
 To install a specific version, use the command: `pip install mlrun==<version>`. Replace the `<version>` placeholder with the MLRun version number.
 ```
+
+## Note for ARM64 (Apple Silicon) Users
+
+When using ARM64 (Apple Silicon), you need to use **conda** and install protobuf by running the following command:
+
+```bash
+conda install "protobuf>=3.20.3, <4" -y
+````
 
 2. **Advanced** <br> 
    - If you expect to connect to, or work with, cloud providers (Azure/Google Cloud/S3), you can install additional packages. This is not 
@@ -39,21 +60,35 @@ To install a specific version, use the command: `pip install mlrun==<version>`. 
      - ```pip install mlrun[google-cloud-storage]``` Install requirements for Google cloud storage
    
       
-   - To install all extras, run: ```pip install mlrun[complete]``` See the full list [here](https://github.com/mlrun/mlrun/blob/development/setup.py#L75).<br>
+   - To install all extras, run: ```pip install mlrun[complete]``` See the full list [here](https://github.com/mlrun/mlrun/blob/development/dependencies.py#L25).<br>
      
-2. Alternatively, if you already installed a previous version of MLRun, upgrade it by running:
+3. Alternatively, if you already installed a previous version of MLRun, upgrade it by running:
 
     ```sh
     pip install -U mlrun==<version>
     ```
 
-3. Ensure that you have remote access to your MLRun service (i.e., to the service URL on the remote Kubernetes cluster).
+4. Ensure that you have remote access to your MLRun service (i.e., to the service URL on the remote Kubernetes cluster).
+5. When installing other python packages on top of MLRun, make sure to install them with mlrun in the same command/requirement file to avoid version conflicts. For example:
+    ```sh
+    pip install mlrun <other-package>
+    ```
+    or
+    ```sh
+    pip install -r requirements.txt
+    ```
+    where `requirements.txt` contains:
+    ```
+    mlrun
+    <other-package>
+    ```
+    Do so even if you already have MLRun installed so that pip will take MLRun requirements into consideration when installing the other package.
 
 ## Configure remote environment
 You have a few options to configure your remote environment:
 - [Using `mlrun config set` command in MLRun CLI](#using-mlrun-config-set-command-in-mlrun-cli)
-- [Using `mlrun.set_environment` command in MLRun SDK](#using-mlrun-set-environment-command-in-mlrun-sdk)
-- [Using your IDE (e.g PyCharm or VSCode)](#using-your-ide-e-g-pycharm-or-vscode)
+- [Using `mlrun.set_environment` command in MLRun SDK](#using-mlrunset_environment-command-in-mlrun-sdk)
+- [Using your IDE (e.g PyCharm or VSCode)](#using-your-ide-eg-pycharm-or-vscode)
 
 ### Using `mlrun config set` command in MLRun CLI
 
@@ -72,7 +107,7 @@ MLRUN_DBPATH=http://localhost:8080
 MLRUN_DBPATH saves the URL endpoint of the MLRun APIs service endpoint. Since it is localhost, username and access_key are not required (as in Example2) <br>
 
 **Example 2**<br>
-**Note:** Only relevant if your remote service is on an instance of the Iguazio MLOps Platform (**not MLRun CE**). <br>
+**Note:** Only relevant if your remote service is on an instance of the Iguazio AI Platform (**not MLRun CE**). <br>
 Run this command in MLRun CLI:
  ```
  mlrun config set -a https://mlrun-api.default-tenant.app.xxx.iguazio-cd1.com -u joe -k mykey -e 
@@ -101,7 +136,7 @@ If the MLRUN_DBPATH points to a remote iguazio cluster and the V3IO_API and/or V
 
 The `mlrun config set` command sets configuration parameters in mlrun default or the specified environment file. By default, it stores all 
 of the configuration into the default environment file, and your own environment file does not need editing. The default environment file is 
-created by default at `~/.mlrun.env` for Linux and `%USERPROFILE%/.mlrun.env` for Windows. 
+created by default at `~/.mlrun.env`. 
 
 The `set` command can work with the following parameters:
 - `--env-file` or `-f` to set the url path to the mlrun environment file
@@ -127,7 +162,7 @@ For more explanations read the documentation [mlrun.set_environment](https://doc
 
 ### Using your IDE (e.g. PyCharm or VSCode)
 
-Use these procedures to access MLRun remotely from your IDE (PyCharm or VSCode).
+Use these procedures to access MLRun remotely from your IDE. These instructions are for PyCharm and VSCode.
 
 #### Create environment file
 
@@ -143,7 +178,7 @@ V3IO_ACCESS_KEY=<platform access key>
 ```
 
 ```{admonition} Note
-If your remote service is on an instance of the Iguazio MLOps Platform, you can get all these parameters from the platform dashboard: select 
+If your remote service is on an instance of the Iguazio AI Platform, you can get all these parameters from the platform dashboard: select 
 the user-profile picture or icon from the top right corner of any page, and select  **Remote settings**. They are copied to the clipboard.
 ```
 
@@ -173,9 +208,9 @@ edit box and expand it to edit the environment variables.
     ![Environment variables](../_static/images/pycharm/remote-pycharm-environment_variables.png)
     
 
-   > If the remote service is on an instance of the Iguazio MLOps Platform, also set the environment variables and values of `V3IO_USERNAME`, and `V3IO_ACCESS_KEY`.
+   > If the remote service is on an instance of the Iguazio AI Platform, also set the environment variables and values of `V3IO_USERNAME`, and `V3IO_ACCESS_KEY`.
 
-#### Remote environment from VScode
+#### Remote environment from VSCode
 
 Create a [debug configuration in VSCode](https://code.visualstudio.com/docs/python/debugging). Configurations are defined in a `launch.json` 
 file that's stored in a `.vscode` folder in your workspace.
@@ -230,3 +265,15 @@ If you created a new configuration in the previous step, your `launch.json` woul
     ]
 }
 ```
+
+## Setting up a dark site
+Use this procedure for the MLRun package, and any other packages you want to install on a dark site.
+
+To install a package in a dark (air-gapped) site:
+1. Download the packages: conda==23.1.0, pip.
+2. Pack the conda package file and upload it to your dark system.
+2. Install the tar.gz by running:
+
+   ```
+   conda install -y <package-filename>.tar.gz 
+   ```

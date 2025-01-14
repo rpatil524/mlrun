@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List
+from typing import Any, Optional
 
 import numpy as np
 import transformers
@@ -32,14 +32,14 @@ class HuggingFaceModelServer(V2ModelServer):
     def __init__(
         self,
         context: mlrun.MLClientCtx = None,
-        name: str = None,
-        task: str = None,
-        model_path: str = None,
-        model_name: str = None,
-        model_class: str = None,
-        tokenizer_name: str = None,
-        tokenizer_class: str = None,
-        framework: str = None,
+        name: Optional[str] = None,
+        task: Optional[str] = None,
+        model_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+        model_class: Optional[str] = None,
+        tokenizer_name: Optional[str] = None,
+        tokenizer_class: Optional[str] = None,
+        framework: Optional[str] = None,
         **class_args,
     ):
         """
@@ -65,7 +65,7 @@ class HuggingFaceModelServer(V2ModelServer):
                                 framework of the `model`, or to PyTorch if no model is provided
         :param class_args:      -
         """
-        super(HuggingFaceModelServer, self).__init__(
+        super().__init__(
             context=context,
             name=name,
             model_path=model_path,
@@ -104,7 +104,7 @@ class HuggingFaceModelServer(V2ModelServer):
             framework=self.framework,
         )
 
-    def predict(self, request: Dict[str, Any]) -> List:
+    def predict(self, request: dict[str, Any]) -> list:
         """
         Generate model predictions from sample.
         :param request: The request to the model. The input to the model will be read from the "inputs" key.
@@ -135,7 +135,7 @@ class HuggingFaceModelServer(V2ModelServer):
 
         return result
 
-    def explain(self, request: Dict) -> str:
+    def explain(self, request: dict) -> str:
         """
         Return a string explaining what model is being served in this serving function and the function name.
         :param request: A given request.

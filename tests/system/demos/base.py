@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 import os
+from typing import Optional
 
 import mlrun
 from tests.system.base import TestMLRunSystem
@@ -20,7 +21,6 @@ from tests.system.base import TestMLRunSystem
 
 class TestDemo(TestMLRunSystem):
     def custom_setup(self):
-
         # specifically for each workflow, this combines the artifact path above with a
         # unique path made from the workflow uid.
         self._workflow_artifact_path = os.path.join(
@@ -37,7 +37,9 @@ class TestDemo(TestMLRunSystem):
     def create_demo_project(self) -> mlrun.projects.MlrunProject:
         raise NotImplementedError
 
-    def run_and_verify_project(self, runs_amount: int = 1, arguments: dict = None):
+    def run_and_verify_project(
+        self, runs_amount: int = 1, arguments: Optional[dict] = None
+    ):
         arguments = arguments or {}
         run_id = self._demo_project.run(
             "main",
