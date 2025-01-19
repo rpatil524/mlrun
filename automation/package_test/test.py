@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 import json
 import re
 import subprocess
-import sys
 
 import click
 
@@ -29,23 +28,24 @@ class PackageTester:
         self._logger = logger
 
         basic_import = "import mlrun"
-        api_import = "import mlrun.api.main"
         s3_import = "import mlrun.datastore.s3"
         azure_blob_storage_import = "import mlrun.datastore.azure_blob"
         azure_key_vault_import = "import mlrun.utils.azure_vault"
         google_cloud_bigquery_import = (
             "from mlrun.datastore.sources import BigQuerySource"
         )
+        oss_import = "import mlrun.datastore.alibaba_oss"
         google_cloud_storage_import = "import mlrun.datastore.google_cloud_storage"
         targets_import = "import mlrun.datastore.targets"
         redis_import = "import redis"
+        mlflow_import = "import mlflow"
 
         self._extras_tests_data = {
             "": {"import_test_command": f"{basic_import}"},
-            "[api]": {"import_test_command": f"{basic_import}; {api_import}"},
+            "[api]": {"import_test_command": f"{basic_import}"},
             "[complete-api]": {
-                "import_test_command": f"{basic_import}; {api_import}; {s3_import}; "
-                + f"{azure_blob_storage_import}; {azure_key_vault_import}",
+                "import_test_command": f"{basic_import}; {s3_import}; {azure_blob_storage_import}; "
+                f"{azure_key_vault_import}",
                 "perform_vulnerability_check": True,
             },
             "[s3]": {"import_test_command": f"{basic_import}; {s3_import}"},
@@ -55,11 +55,12 @@ class PackageTester:
             "[azure-key-vault]": {
                 "import_test_command": f"{basic_import}; {azure_key_vault_import}"
             },
+            "[alibaba-oss]": {"import_test_command": f"{basic_import}; {oss_import}"},
             # TODO: this won't actually fail if the requirement is missing
             "[google-cloud-bigquery]": {
                 "import_test_command": f"{basic_import}; {google_cloud_bigquery_import}"
             },
-            "[google-cloud-storage]": {
+            "[google-cloud]": {
                 "import_test_command": f"{basic_import}; {google_cloud_storage_import}"
             },
             "[redis]": {"import_test_command": f"{basic_import}; {redis_import}"},
@@ -67,9 +68,11 @@ class PackageTester:
             "[kafka]": {"import_test_command": f"{basic_import}; {targets_import}"},
             "[complete]": {
                 "import_test_command": f"{basic_import}; {s3_import}; {azure_blob_storage_import}; "
-                + f"{azure_key_vault_import}; {google_cloud_storage_import}; {redis_import}; {targets_import}",
+                + f"{azure_key_vault_import}; {google_cloud_storage_import};"
+                + f" {redis_import}; {targets_import}; {oss_import}",
                 "perform_vulnerability_check": True,
             },
+            "[mlflow]": {"import_test_command": f"{basic_import}; {mlflow_import}"},
         }
 
     def run(self):
@@ -166,7 +169,8 @@ class PackageTester:
             raise_on_error=False,
         )
         if code != 0:
-            vulnerabilities = json.loads(stdout)
+            full_report = json.loads(stdout)
+            vulnerabilities = full_report["vulnerabilities"]
             if vulnerabilities:
                 self._logger.debug(
                     "Found requirements vulnerabilities",
@@ -202,22 +206,17 @@ class PackageTester:
                 ],
             }
 
-            python_3_7 = sys.version_info[0] == 3 and sys.version_info[1] == 7
-            if python_3_7:
-                ignored_vulnerabilities["numpy"] = [
-                    {
-                        "pattern": r"^Numpy 1.22.2  includes a fix for CVE-2021-41495:(.*)",
-                        "reason": "Numpy support for 3.7 has stopped post 1.21.x",
-                    }
-                ]
-
             filtered_vulnerabilities = []
             for vulnerability in vulnerabilities:
-                if vulnerability[0] in ignored_vulnerabilities:
-                    ignored_vulnerability = ignored_vulnerabilities[vulnerability[0]]
+                if vulnerability["package_name"] in ignored_vulnerabilities:
+                    ignored_vulnerability = ignored_vulnerabilities[
+                        vulnerability["package_name"]
+                    ]
                     ignore_vulnerability = False
                     for ignored_pattern in ignored_vulnerability:
-                        if re.search(ignored_pattern["pattern"], vulnerability[3]):
+                        if re.search(
+                            ignored_pattern["pattern"], vulnerability["advisory"]
+                        ):
                             self._logger.debug(
                                 "Ignoring vulnerability",
                                 vulnerability=vulnerability,
@@ -232,7 +231,6 @@ class PackageTester:
                 message = "Found vulnerable requirements that can not be ignored"
                 logger.warning(
                     message,
-                    vulnerabilities=vulnerabilities,
                     filtered_vulnerabilities=filtered_vulnerabilities,
                     ignored_vulnerabilities=ignored_vulnerabilities,
                 )
@@ -274,7 +272,7 @@ class PackageTester:
             extra=extra,
         )
         self._run_command(
-            "python -m pip install --upgrade pip~=22.3.0",
+            "python -m pip install --upgrade pip~=24.0",
             run_in_venv=True,
         )
 
@@ -292,8 +290,7 @@ class PackageTester:
                 env=env,
                 shell=True,
                 check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 encoding="utf-8",
             )
         except subprocess.CalledProcessError as exc:

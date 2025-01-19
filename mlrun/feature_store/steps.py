@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import math
 import re
 import uuid
-import warnings
 from collections import OrderedDict
-from typing import Any, Dict, List, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -40,7 +40,9 @@ def get_engine(first_event):
 class MLRunStep(MapClass):
     def __init__(self, **kwargs):
         """Abstract class for mlrun step.
-        Can be used in pandas/storey/spark feature set ingestion"""
+        Can be used in pandas/storey/spark feature set ingestion. Extend this class and implement the relevant
+        `_do_XXX` methods to support the required execution engines.
+        """
         super().__init__(**kwargs)
         self._engine_to_do_method = {
             "pandas": self._do_pandas,
@@ -51,29 +53,45 @@ class MLRunStep(MapClass):
     def do(self, event):
         """
         This method defines the do method of this class according to the first event type.
+
+        .. warning::
+            When extending this class, do not override this method; only override the `_do_XXX` methods.
         """
         engine = get_engine(event)
         self.do = self._engine_to_do_method.get(engine, None)
         if self.do is None:
-            raise mlrun.errors.InvalidArgummentError(
+            raise mlrun.errors.MLRunInvalidArgumentError(
                 f"Unrecognized engine: {engine}. Available engines are: pandas, spark and storey"
             )
 
         return self.do(event)
 
     def _do_pandas(self, event):
+        """
+        The execution method for pandas engine.
+
+        :param event: Incoming event, a `pandas.DataFrame` object.
+        """
         raise NotImplementedError
 
     def _do_storey(self, event):
+        """
+        The execution method for storey engine.
+
+        :param event: Incoming event, a dictionary or `storey.Event` object, depending on the `full_event` value.
+        """
         raise NotImplementedError
 
     def _do_spark(self, event):
+        """
+        The execution method for spark engine.
+
+        :param event: Incoming event, a `pyspark.sql.DataFrame` object.
+        """
         raise NotImplementedError
 
 
 class FeaturesetValidator(StepToDict, MLRunStep):
-    """Validate feature values according to the feature set validation policy"""
-
     def __init__(self, featureset=None, columns=None, name=None, **kwargs):
         """Validate feature values according to the feature set validation policy
 
@@ -132,11 +150,9 @@ class FeaturesetValidator(StepToDict, MLRunStep):
 
 
 class MapValues(StepToDict, MLRunStep):
-    """Map column values to new values"""
-
     def __init__(
         self,
-        mapping: Dict[str, Dict[str, Any]],
+        mapping: dict[str, dict[Union[str, int, bool], Any]],
         with_original_features: bool = False,
         suffix: str = "mapped",
         **kwargs,
@@ -146,13 +162,19 @@ class MapValues(StepToDict, MLRunStep):
         example::
 
             # replace the value "U" with '0' in the age column
-            graph.to(MapValues(mapping={'age': {'U': '0'}}, with_original_features=True))
+            graph.to(MapValues(mapping={"age": {"U": "0"}}, with_original_features=True))
 
             # replace integers, example
-            graph.to(MapValues(mapping={'not': {0: 1, 1: 0}}))
+            graph.to(MapValues(mapping={"not": {0: 1, 1: 0}}))
 
             # replace by range, use -inf and inf for extended range
-            graph.to(MapValues(mapping={'numbers': {'ranges': {'negative': [-inf, 0], 'positive': [0, inf]}}}))
+            graph.to(
+                MapValues(
+                    mapping={
+                        "numbers": {"ranges": {"negative": [-inf, 0], "positive": [0, inf]}}
+                    }
+                )
+            )
 
         :param mapping: a dict with entry per column and the associated old/new values map
         :param with_original_features: set to True to keep the original features
@@ -226,34 +248,130 @@ class MapValues(StepToDict, MLRunStep):
     def _do_spark(self, event):
         from itertools import chain
 
-        from pyspark.sql.functions import col, create_map, lit, when
+        from pyspark.sql.functions import col, create_map, isnan, isnull, lit, when
+        from pyspark.sql.types import DecimalType, DoubleType, FloatType
+        from pyspark.sql.utils import AnalysisException
 
+        df = event
+        source_column_names = df.columns
         for column, column_map in self.mapping.items():
             new_column_name = self._get_feature_name(column)
-            if "ranges" not in column_map:
+            if self.get_ranges_key() not in column_map:
+                if column not in source_column_names:
+                    continue
                 mapping_expr = create_map([lit(x) for x in chain(*column_map.items())])
-                event = event.withColumn(
-                    new_column_name, mapping_expr.getItem(col(column))
-                )
+                try:
+                    df = df.withColumn(
+                        new_column_name,
+                        when(
+                            col(column).isin(list(column_map.keys())),
+                            mapping_expr.getItem(col(column)),
+                        ).otherwise(col(column)),
+                    )
+                #  if failed to use otherwise it is probably because the new column has different type
+                #  then the original column.
+                #  we will try to replace the values without using 'otherwise'.
+                except AnalysisException:
+                    df = df.withColumn(
+                        new_column_name, mapping_expr.getItem(col(column))
+                    )
+                    col_type = df.schema[column].dataType
+                    new_col_type = df.schema[new_column_name].dataType
+                    #  in order to avoid exception at isna on non-decimal/float columns -
+                    #  we need to check their types before filtering.
+                    if isinstance(col_type, (FloatType, DoubleType, DecimalType)):
+                        column_filter = (~isnull(col(column))) & (~isnan(col(column)))
+                    else:
+                        column_filter = ~isnull(col(column))
+                    if isinstance(new_col_type, (FloatType, DoubleType, DecimalType)):
+                        new_column_filter = isnull(col(new_column_name)) | isnan(
+                            col(new_column_name)
+                        )
+                    else:
+                        #  we need to check that every value replaced if we changed column type - except None or NaN.
+                        new_column_filter = isnull(col(new_column_name))
+                    mapping_to_null = [
+                        k
+                        for k, v in column_map.items()
+                        if v is None
+                        or (
+                            isinstance(v, (float, np.float64, np.float32, np.float16))
+                            and math.isnan(v)
+                        )
+                    ]
+                    turned_to_none_values = df.filter(
+                        column_filter & new_column_filter
+                    ).filter(~col(column).isin(mapping_to_null))
+
+                    if len(turned_to_none_values.head(1)) > 0:
+                        raise mlrun.errors.MLRunInvalidArgumentError(
+                            f"MapValues - mapping that changes column type must change all values accordingly,"
+                            f" which is not the case for column '{column}'"
+                        )
             else:
                 for val, val_range in column_map["ranges"].items():
                     min_val = val_range[0] if val_range[0] != "-inf" else -np.inf
                     max_val = val_range[1] if val_range[1] != "inf" else np.inf
                     otherwise = ""
-                    if new_column_name in event.columns:
-                        otherwise = event[new_column_name]
-                    event = event.withColumn(
+                    if new_column_name in df.columns:
+                        otherwise = df[new_column_name]
+                    df = df.withColumn(
                         new_column_name,
                         when(
-                            (event[column] < max_val) & (event[column] >= min_val),
+                            (df[column] < max_val) & (df[column] >= min_val),
                             lit(val),
                         ).otherwise(otherwise),
                     )
 
         if not self.with_original_features:
-            event = event.select(*self.mapping.keys())
+            df = df.select(*self.mapping.keys())
 
-        return event
+        return df
+
+    @classmethod
+    def validate_args(cls, feature_set, **kwargs):
+        mapping = kwargs.get("mapping", [])
+        for column, column_map in mapping.items():
+            if cls.get_ranges_key() not in column_map:
+                types = set(
+                    type(val)
+                    for val in column_map.values()
+                    if type(val) is not None
+                    and not (
+                        isinstance(val, (float, np.float64, np.float32, np.float16))
+                        and math.isnan(val)
+                    )
+                )
+            else:
+                if len(column_map) > 1:
+                    raise mlrun.errors.MLRunInvalidArgumentError(
+                        f"MapValues - mapping values of the same column can not combine ranges and "
+                        f"single replacement, which is the case for column '{column}'"
+                    )
+                ranges_dict = column_map[cls.get_ranges_key()]
+                types = set()
+                for ranges_mapping_values in ranges_dict.values():
+                    range_types = set(
+                        type(val)
+                        for val in ranges_mapping_values
+                        if type(val) is not None
+                        and val != "-inf"
+                        and val != "inf"
+                        and not (
+                            isinstance(val, (float, np.float64, np.float32, np.float16))
+                            and math.isnan(val)
+                        )
+                    )
+                    types = types.union(range_types)
+            if len(types) > 1:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"MapValues - mapping values of the same column must be in the"
+                    f" same type, which was not the case for Column '{column}'"
+                )
+
+    @staticmethod
+    def get_ranges_key():
+        return "ranges"
 
 
 class Imputer(StepToDict, MLRunStep):
@@ -261,7 +379,7 @@ class Imputer(StepToDict, MLRunStep):
         self,
         method: str = "avg",
         default_value=None,
-        mapping: Dict[str, Any] = None,
+        mapping: Optional[dict[str, Any]] = None,
         **kwargs,
     ):
         """Replace None values with default values
@@ -295,7 +413,6 @@ class Imputer(StepToDict, MLRunStep):
         return event
 
     def _do_spark(self, event):
-
         for feature in event.columns:
             val = self.mapping.get(feature, self.default_value)
             if val is not None:
@@ -308,13 +425,15 @@ class Imputer(StepToDict, MLRunStep):
 
 
 class OneHotEncoder(StepToDict, MLRunStep):
-    def __init__(self, mapping: Dict[str, List[Union[int, str]]], **kwargs):
+    def __init__(self, mapping: dict[str, list[Union[int, str]]], **kwargs):
         """Create new binary fields, one per category (one hot encoded)
 
         example::
 
-            mapping = {'category': ['food', 'health', 'transportation'],
-                       'gender': ['male', 'female']}
+            mapping = {
+                "category": ["food", "health", "transportation"],
+                "gender": ["male", "female"],
+            }
             graph.to(OneHotEncoder(mapping=one_hot_encoder_mapping))
 
         :param mapping: a dict of per column categories (to map to binary fields)
@@ -335,7 +454,6 @@ class OneHotEncoder(StepToDict, MLRunStep):
         encoding = self.mapping.get(feature, [])
 
         if encoding:
-
             one_hot_encoding = {
                 f"{feature}_{OneHotEncoder._sanitized_category(category)}": 0
                 for category in encoding
@@ -344,8 +462,10 @@ class OneHotEncoder(StepToDict, MLRunStep):
                 one_hot_encoding[
                     f"{feature}_{OneHotEncoder._sanitized_category(value)}"
                 ] = 1
-            else:
-                print(f"Warning, {value} is not a known value by the encoding")
+            elif self.logger:
+                self.logger.warn(
+                    f"OneHotEncoder does not have an encoding for value '{value}' of feature '{feature}'"
+                )
             return one_hot_encoding
 
         return {feature: value}
@@ -358,7 +478,6 @@ class OneHotEncoder(StepToDict, MLRunStep):
         return encoded_values
 
     def _do_pandas(self, event):
-
         for key, values in self.mapping.items():
             event[key] = pd.Categorical(event[key], categories=list(values))
             encoded = pd.get_dummies(event[key], prefix=key, dtype=np.int64)
@@ -395,15 +514,13 @@ class OneHotEncoder(StepToDict, MLRunStep):
 
 
 class DateExtractor(StepToDict, MLRunStep):
-    """Date Extractor allows you to extract a date-time component"""
-
     def __init__(
         self,
-        parts: Union[Dict[str, str], List[str]],
-        timestamp_col: str = None,
+        parts: Union[dict[str, str], list[str]],
+        timestamp_col: Optional[str] = None,
         **kwargs,
     ):
-        """Date Extractor extract a date-time component into new columns
+        """Date Extractor extracts a date-time component into new columns
 
         The extracted date part will appear as `<timestamp_col>_<date_part>` feature.
 
@@ -433,10 +550,12 @@ class DateExtractor(StepToDict, MLRunStep):
 
             # (taken from the fraud-detection end-to-end feature store demo)
             # Define the Transactions FeatureSet
-            transaction_set = fstore.FeatureSet("transactions",
-                                            entities=[fstore.Entity("source")],
-                                            timestamp_key='timestamp',
-                                            description="transactions feature set")
+            transaction_set = fstore.FeatureSet(
+                "transactions",
+                entities=[fstore.Entity("source")],
+                timestamp_key="timestamp",
+                description="transactions feature set",
+            )
 
             # Get FeatureSet computation graph
             transaction_graph = transaction_set.graph
@@ -444,11 +563,11 @@ class DateExtractor(StepToDict, MLRunStep):
             # Add the custom `DateExtractor` step
             # to the computation graph
             transaction_graph.to(
-                    class_name='DateExtractor',
-                    name='Extract Dates',
-                    parts = ['hour', 'day_of_week'],
-                    timestamp_col = 'timestamp',
-                )
+                class_name="DateExtractor",
+                name="Extract Dates",
+                parts=["hour", "day_of_week"],
+                timestamp_col="timestamp",
+            )
 
         :param parts: list of pandas style date-time parts you want to extract.
         :param timestamp_col: The name of the column containing the timestamps to extract from,
@@ -514,16 +633,13 @@ class DateExtractor(StepToDict, MLRunStep):
 
 
 class SetEventMetadata(MapClass):
-    """Set the event metadata (id and key) from the event body"""
-
     def __init__(
         self,
-        id_path: str = None,
-        key_path: str = None,
-        time_path: str = None,
-        random_id: bool = None,
+        id_path: Optional[str] = None,
+        key_path: Optional[str] = None,
+        random_id: Optional[bool] = None,
         **kwargs,
-    ):
+    ) -> None:
         """Set the event metadata (id, key) from the event body
 
         set the event metadata fields (id and key) from the event body data structure
@@ -545,16 +661,8 @@ class SetEventMetadata(MapClass):
 
         :param id_path:   path to the id value
         :param key_path:  path to the key value
-        :param time_path: DEPRECATED
         :param random_id: if True will set the event.id to a random value
         """
-        if time_path:
-            warnings.warn(
-                "SetEventMetadata's 'time_path' parameter is deprecated in 1.3.0 and will be removed in 1.5.0. "
-                "It has no effect.",
-                FutureWarning,
-            )
-
         kwargs["full_event"] = True
         super().__init__(**kwargs)
         self.id_path = id_path
@@ -563,7 +671,7 @@ class SetEventMetadata(MapClass):
 
         self._tagging_funcs = []
 
-    def post_init(self, mode="sync"):
+    def post_init(self, mode="sync", **kwargs):
         def add_metadata(name, path, operator=str):
             def _add_meta(event):
                 value = get_in(event.body, path)
@@ -589,21 +697,22 @@ class SetEventMetadata(MapClass):
 
 
 class DropFeatures(StepToDict, MLRunStep):
-    def __init__(self, features: List[str], **kwargs):
+    def __init__(self, features: list[str], **kwargs):
         """Drop all the features from feature list
 
         :param features:    string list of the features names to drop
 
         example::
 
-            feature_set = fstore.FeatureSet("fs-new",
-                                        entities=[fstore.Entity("id")],
-                                        description="feature set",
-                                        engine="pandas",
-                                        )
+            feature_set = fstore.FeatureSet(
+                "fs-new",
+                entities=[fstore.Entity("id")],
+                description="feature set",
+                engine="pandas",
+            )
             # Pre-processing graph steps
             feature_set.graph.to(DropFeatures(features=["age"]))
-            df_pandas = fstore.ingest(feature_set, data)
+            df_pandas = feature_set.ingest(data)
 
         """
         super().__init__(**kwargs)
@@ -633,4 +742,12 @@ class DropFeatures(StepToDict, MLRunStep):
         if dropped_entities:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 f"DropFeatures can only drop features, not entities: {dropped_entities}"
+            )
+        if feature_set.spec.label_column in features:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                f"DropFeatures can not drop label_column: {feature_set.spec.label_column}"
+            )
+        if feature_set.spec.timestamp_key in features:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                f"DropFeatures can not drop timestamp_key: {feature_set.spec.timestamp_key}"
             )

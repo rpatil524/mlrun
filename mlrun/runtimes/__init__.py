@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
-
 __all__ = [
     "BaseRuntime",
     "KubejobRuntime",
@@ -23,31 +21,35 @@ __all__ = [
     "ServingRuntime",
     "DaskCluster",
     "RemoteSparkRuntime",
+    "Spark3Runtime",
+    "DatabricksRuntime",
+    "KubeResource",
+    "ApplicationRuntime",
+    "MpiRuntimeV1",
 ]
 
+import typing
 
-from mlrun.runtimes.package.context_handler import ArtifactType, ContextHandler
-from mlrun.runtimes.utils import (
-    resolve_mpijob_crd_version,
-    resolve_spark_operator_version,
-)
+from mlrun.runtimes.utils import resolve_spark_operator_version
 
-from .base import BaseRuntime, BaseRuntimeHandler, RunError, RuntimeClassMode  # noqa
-from .constants import MPIJobCRDVersions
-from .daskjob import DaskCluster, DaskRuntimeHandler, get_dask_resource  # noqa
-from .function import RemoteRuntime
-from .kubejob import KubejobRuntime, KubeRuntimeHandler  # noqa
+from ..common.runtimes.constants import MPIJobCRDVersions
+from .base import BaseRuntime, RunError, RuntimeClassMode  # noqa
+from .daskjob import DaskCluster  # noqa
+from .databricks_job.databricks_runtime import DatabricksRuntime
+from .kubejob import KubejobRuntime, KubeResource  # noqa
 from .local import HandlerRuntime, LocalRuntime  # noqa
-from .mpijob import (  # noqa
-    MpiRuntimeV1,
-    MpiRuntimeV1Alpha1,
-    MpiV1Alpha1RuntimeHandler,
-    MpiV1RuntimeHandler,
+from .mpijob import MpiRuntimeV1  # noqa
+from .nuclio import (
+    RemoteRuntime,
+    ServingRuntime,
+    new_v2_model_server,
+    nuclio_init_hook,
 )
-from .nuclio import nuclio_init_hook
-from .remotesparkjob import RemoteSparkRuntime, RemoteSparkRuntimeHandler
-from .serving import ServingRuntime, new_v2_model_server
-from .sparkjob import Spark3Runtime, SparkRuntimeHandler
+from .nuclio.api_gateway import APIGateway
+from .nuclio.application import ApplicationRuntime
+from .nuclio.serving import serving_subkind
+from .remotesparkjob import RemoteSparkRuntime
+from .sparkjob import Spark3Runtime
 
 # for legacy imports (MLModelServer moved from here to /serving)
 from ..serving import MLModelServer, new_v1_model_server  # noqa isort: skip
@@ -56,7 +58,7 @@ from ..serving import MLModelServer, new_v1_model_server  # noqa isort: skip
 def new_model_server(
     name,
     model_class: str,
-    models: dict = None,
+    models: typing.Optional[dict] = None,
     filename="",
     protocol="",
     image="",
@@ -92,7 +94,7 @@ def new_model_server(
         )
 
 
-class RuntimeKinds(object):
+class RuntimeKinds:
     remote = "remote"
     nuclio = "nuclio"
     dask = "dask"
@@ -103,6 +105,8 @@ class RuntimeKinds(object):
     serving = "serving"
     local = "local"
     handler = "handler"
+    databricks = "databricks"
+    application = "application"
 
     @staticmethod
     def all():
@@ -116,6 +120,8 @@ class RuntimeKinds(object):
             RuntimeKinds.remotespark,
             RuntimeKinds.mpijob,
             RuntimeKinds.local,
+            RuntimeKinds.databricks,
+            RuntimeKinds.application,
         ]
 
     @staticmethod
@@ -126,6 +132,7 @@ class RuntimeKinds(object):
             RuntimeKinds.spark,
             RuntimeKinds.remotespark,
             RuntimeKinds.mpijob,
+            RuntimeKinds.databricks,
         ]
 
     @staticmethod
@@ -135,6 +142,10 @@ class RuntimeKinds(object):
             RuntimeKinds.spark,
             RuntimeKinds.remotespark,
             RuntimeKinds.mpijob,
+            RuntimeKinds.databricks,
+            RuntimeKinds.local,
+            RuntimeKinds.handler,
+            "",
         ]
 
     @staticmethod
@@ -143,6 +154,23 @@ class RuntimeKinds(object):
             RuntimeKinds.remote,
             RuntimeKinds.nuclio,
             RuntimeKinds.serving,
+            RuntimeKinds.application,
+        ]
+
+    @staticmethod
+    def pure_nuclio_deployed_runtimes():
+        return [
+            RuntimeKinds.remote,
+            RuntimeKinds.nuclio,
+            RuntimeKinds.serving,
+        ]
+
+    @staticmethod
+    def handlerless_runtimes():
+        return [
+            RuntimeKinds.serving,
+            # Application runtime handler is internal reverse proxy
+            RuntimeKinds.application,
         ]
 
     @staticmethod
@@ -153,7 +181,7 @@ class RuntimeKinds(object):
         ]
 
     @staticmethod
-    def is_log_collectable_runtime(kind: str):
+    def is_log_collectable_runtime(kind: typing.Optional[str]):
         """
         whether log collector can collect logs for that runtime
         :param kind: kind name
@@ -164,13 +192,18 @@ class RuntimeKinds(object):
         if RuntimeKinds.is_local_runtime(kind):
             return False
 
-        if kind not in [
-            # dask implementation is different than other runtimes, because few runs can be run against the same runtime
-            # resource, so collecting logs on that runtime resource won't be correct, the way we collect logs for dask
-            # is by using `log_std` on client side after we execute the code against the cluster, as submitting the
-            # run with the dask client will return the run stdout. for more information head to `DaskCluster._run`
-            RuntimeKinds.dask
-        ]:
+        if (
+            kind
+            not in [
+                # dask implementation is different from other runtimes, because few runs can be run against the same
+                # runtime resource, so collecting logs on that runtime resource won't be correct, the way we collect
+                # logs for dask is by using `log_std` on client side after we execute the code against the cluster,
+                # as submitting the run with the dask client will return the run stdout.
+                # For more information head to `DaskCluster._run`.
+                RuntimeKinds.dask
+            ]
+            + RuntimeKinds.nuclio_runtimes()
+        ):
             return True
 
         return False
@@ -183,25 +216,9 @@ class RuntimeKinds(object):
         return False
 
     @staticmethod
-    def is_watchable(kind):
-        """
-        Returns True if the runtime kind is watchable, False otherwise.
-        Runtimes that are not watchable are blocking, meaning that the run() method will not return until the runtime
-        is completed.
-        """
-        # "" or None counted as local
-        if not kind:
-            return False
-        return kind not in [
-            RuntimeKinds.local,
-            RuntimeKinds.handler,
-            RuntimeKinds.dask,
-        ]
-
-    @staticmethod
     def requires_absolute_artifacts_path(kind):
         """
-        Returns True if the runtime kind requires absolute artifacts' path (e.i. is local), False otherwise.
+        Returns True if the runtime kind requires absolute artifacts' path (i.e. is local), False otherwise.
         """
         if RuntimeKinds.is_local_runtime(kind):
             return False
@@ -215,49 +232,51 @@ class RuntimeKinds(object):
             return True
         return False
 
+    @staticmethod
+    def requires_image_name_for_execution(kind):
+        if RuntimeKinds.is_local_runtime(kind):
+            return False
 
-runtime_resources_map = {RuntimeKinds.dask: get_dask_resource()}
+        # both spark and remote spark uses different mechanism for assigning images
+        return kind not in [RuntimeKinds.spark, RuntimeKinds.remotespark]
 
-runtime_handler_instances_cache = {}
+    @staticmethod
+    def supports_from_notebook(kind):
+        return kind not in [RuntimeKinds.application]
 
+    @staticmethod
+    def resolve_nuclio_runtime(kind: str, sub_kind: str):
+        kind = kind.split(":")[0]
+        if kind not in RuntimeKinds.nuclio_runtimes():
+            raise ValueError(
+                f"Kind {kind} is not a nuclio runtime, available runtimes are {RuntimeKinds.nuclio_runtimes()}"
+            )
 
-def get_runtime_handler(kind: str) -> BaseRuntimeHandler:
-    global runtime_handler_instances_cache
-    if kind == RuntimeKinds.mpijob:
-        mpijob_crd_version = resolve_mpijob_crd_version()
-        crd_version_to_runtime_handler_class = {
-            MPIJobCRDVersions.v1alpha1: MpiV1Alpha1RuntimeHandler,
-            MPIJobCRDVersions.v1: MpiV1RuntimeHandler,
-        }
-        runtime_handler_class = crd_version_to_runtime_handler_class[mpijob_crd_version]
-        if not runtime_handler_instances_cache.setdefault(RuntimeKinds.mpijob, {}).get(
-            mpijob_crd_version
-        ):
-            runtime_handler_instances_cache[RuntimeKinds.mpijob][
-                mpijob_crd_version
-            ] = runtime_handler_class()
-        return runtime_handler_instances_cache[RuntimeKinds.mpijob][mpijob_crd_version]
+        if sub_kind == serving_subkind:
+            return ServingRuntime()
 
-    kind_runtime_handler_map = {
-        RuntimeKinds.dask: DaskRuntimeHandler,
-        RuntimeKinds.spark: SparkRuntimeHandler,
-        RuntimeKinds.remotespark: RemoteSparkRuntimeHandler,
-        RuntimeKinds.job: KubeRuntimeHandler,
-    }
-    runtime_handler_class = kind_runtime_handler_map[kind]
-    if not runtime_handler_instances_cache.get(kind):
-        runtime_handler_instances_cache[kind] = runtime_handler_class()
-    return runtime_handler_instances_cache[kind]
+        if kind == RuntimeKinds.application:
+            return ApplicationRuntime()
+
+        runtime = RemoteRuntime()
+        runtime.spec.function_kind = sub_kind
+        return runtime
+
+    @staticmethod
+    def resolve_nuclio_sub_kind(kind):
+        is_nuclio = kind.startswith("nuclio")
+        sub_kind = kind[kind.find(":") + 1 :] if is_nuclio and ":" in kind else None
+        if kind == RuntimeKinds.serving:
+            is_nuclio = True
+            sub_kind = serving_subkind
+        elif kind == RuntimeKinds.application:
+            is_nuclio = True
+        return is_nuclio, sub_kind
 
 
 def get_runtime_class(kind: str):
     if kind == RuntimeKinds.mpijob:
-        mpijob_crd_version = resolve_mpijob_crd_version()
-        crd_version_to_runtime = {
-            MPIJobCRDVersions.v1alpha1: MpiRuntimeV1Alpha1,
-            MPIJobCRDVersions.v1: MpiRuntimeV1,
-        }
-        return crd_version_to_runtime[mpijob_crd_version]
+        return MpiRuntimeV1
 
     if kind == RuntimeKinds.spark:
         return Spark3Runtime
@@ -270,6 +289,8 @@ def get_runtime_class(kind: str):
         RuntimeKinds.job: KubejobRuntime,
         RuntimeKinds.local: LocalRuntime,
         RuntimeKinds.remotespark: RemoteSparkRuntime,
+        RuntimeKinds.databricks: DatabricksRuntime,
+        RuntimeKinds.application: ApplicationRuntime,
     }
 
     return kind_runtime_map[kind]

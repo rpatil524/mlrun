@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,9 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
-from typing import Callable, Dict, List, Tuple, Type, Union
+
+from typing import Callable, Optional, Union
 
 import mlrun
 from mlrun.artifacts import get_model
@@ -165,7 +164,7 @@ def get_framework_by_class_name(model: CommonTypes.ModelType) -> str:
     )
 
 
-def framework_to_model_handler(framework: str) -> Type[ModelHandler]:
+def framework_to_model_handler(framework: str) -> type[ModelHandler]:
     """
     Get the ModelHandler class of the given framework's name.
 
@@ -261,8 +260,8 @@ class AutoMLRun:
 
     @staticmethod
     def _get_framework(
-        model: CommonTypes.ModelType = None, model_path: str = None
-    ) -> Union[Tuple[str, dict]]:
+        model: CommonTypes.ModelType = None, model_path: Optional[str] = None
+    ) -> Union[tuple[str, dict]]:
         """
         Try to get the framework from the model or model path provided. The framework can be read from the model path
         only if the model path is of a logged model artifact (store object uri).
@@ -297,6 +296,11 @@ class AutoMLRun:
                     f"The model path provided: '{model_path}' is not of a model artifact (store uri) so the framework "
                     f"attribute must be specified."
                 )
+            elif "framework" not in model_artifact.labels:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"No framework defined for the provided model: '{model_path}'. Please log the model again with "
+                    f"the required framework."
+                )
             # Return the framework and the collected files and artifacts:
             return (
                 model_artifact.labels["framework"],
@@ -315,12 +319,16 @@ class AutoMLRun:
     @staticmethod
     def load_model(
         model_path: str,
-        model_name: str = None,
+        model_name: Optional[str] = None,
         context: mlrun.MLClientCtx = None,
-        modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-        custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-        custom_objects_directory: str = None,
-        framework: str = None,
+        modules_map: Optional[
+            Union[dict[str, Union[None, str, list[str]]], str]
+        ] = None,
+        custom_objects_map: Optional[
+            Union[dict[str, Union[str, list[str]]], str]
+        ] = None,
+        custom_objects_directory: Optional[str] = None,
+        framework: Optional[str] = None,
         **kwargs,
     ) -> ModelHandler:
         """
@@ -358,7 +366,7 @@ class AutoMLRun:
 
                                              {
                                                  "/.../custom_model.py": "MyModel",
-                                                 "/.../custom_objects.py": ["object1", "object2"]
+                                                 "/.../custom_objects.py": ["object1", "object2"],
                                              }
 
                                          All the paths will be accessed from the given 'custom_objects_directory',
@@ -412,14 +420,18 @@ class AutoMLRun:
     @staticmethod
     def apply_mlrun(
         model: CommonTypes.ModelType = None,
-        model_name: str = None,
+        model_name: Optional[str] = None,
         tag: str = "",
-        model_path: str = None,
-        modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-        custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-        custom_objects_directory: str = None,
+        model_path: Optional[str] = None,
+        modules_map: Optional[
+            Union[dict[str, Union[None, str, list[str]]], str]
+        ] = None,
+        custom_objects_map: Optional[
+            Union[dict[str, Union[str, list[str]]], str]
+        ] = None,
+        custom_objects_directory: Optional[str] = None,
         context: mlrun.MLClientCtx = None,
-        framework: str = None,
+        framework: Optional[str] = None,
         auto_log: bool = True,
         **kwargs,
     ) -> ModelHandler:
@@ -459,7 +471,7 @@ class AutoMLRun:
 
                                              {
                                                  "/.../custom_model.py": "MyModel",
-                                                 "/.../custom_objects.py": ["object1", "object2"]
+                                                 "/.../custom_objects.py": ["object1", "object2"],
                                              }
 
                                          All the paths will be accessed from the given 'custom_objects_directory',

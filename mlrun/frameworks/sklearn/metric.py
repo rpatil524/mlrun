@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +15,7 @@
 import importlib
 import json
 import sys
-from types import ModuleType
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import mlrun.errors
 
@@ -32,8 +31,8 @@ class Metric:
     def __init__(
         self,
         metric: Union[Callable, str],
-        name: str = None,
-        additional_arguments: dict = None,
+        name: Optional[str] = None,
+        additional_arguments: Optional[dict] = None,
         need_probabilities: bool = False,
     ):
         """
@@ -182,7 +181,7 @@ class Metric:
         # Metric string was not provided properly:
         raise mlrun.errors.MLRunInvalidArgumentError(
             f"The metric {metric} was not found in the global imports dictionary meaning it was not "
-            f"imported. In order to import it during the run, please provide the full module path to the"
+            f"imported. In order to import it during the run, please provide the full module path to the "
             f"metric. For example: 'module.sub_module.metric' will be parsed as "
             f"from module.sub_module import metric."
         )

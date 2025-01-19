@@ -3,25 +3,39 @@
 
 An artifact is any data that is produced and/or consumed by functions, jobs, or pipelines. 
 
-Artifacts metadata is stored in the project's database. The main types of artifacts are:
--  **Files** &mdash; files, directories, images, figures, and plotlines
--  **Datasets** &mdash; any data, such as tables and DataFrames
--  **Models** &mdash; all trained models
--  **Feature Store Objects** &mdash; Feature sets and feature vectors
+There are several types of Artifacts. The type of the Artifact is reflected in the 
+`kind` attribute of each Artifact. These types are also 
+used for grouping the [artifacts in the UI](#viewing-artifacts). 
+The main kinds of artifacts are:
+
+- Files — Files, directories, images, figures, and plot lines
+- Datasets — Any data, such as tables and DataFrames
+- Models — All trained models
+- Feature Store Objects — Feature sets and feature vectors
+
+Artifacts metadata is stored in the MLRun database. 
+
 
 **In this section**
 - [Viewing artifacts](#viewing-artifacts)
 - [Artifact path](#artifact-path)
 - [Saving artifacts in run-specific paths](#saving-artifacts-in-run-specific-paths)
 - [Artifact URIs, versioning, and metadata](#artifact-uris-versioning-and-metadata)
-- [See also](#see-also)
+- [Deleting artifacts](#deleting-artifacts)
+
+**See also:**
+- {ref}`working-with-data-and-model-artifacts`
+- {ref}`models`
+- {ref}`logging_datasets`
+- [Logging a Databricks response as an artifact](../runtimes/databricks.ipynb#logging-a-databricks-response-as-an-artifact)
 
 
 ## Viewing artifacts
 
 Artifacts that are stored in certain paths (see [Artifact path](#artifact-path)) can be viewed and managed in the UI. 
 In the **Project** page, select the type of artifact you want to view from the left-hand menu: 
-Feature Store (for feature-sets, feature-vectors and features), Datasets, Artifacts, or Models.
+Feature Store (for feature-sets, feature-vectors, and features), Datasets, Models, and Artifacts (holds everything not 
+in the other categories).
 
 Example dataset artifact screen:
 <br><br>
@@ -34,12 +48,18 @@ For each artifact, you can view its content, its location, the artifact type, la
 the producer of the artifact, the artifact owner, last update date, and type-specific information.
 You can download the artifact. You can also tag and remove tags from artifacts using the UI.
 
+The UI limits the artifact query display to 1000 records. You can add filters to narrow the query results. 
+(Each search could results in a different set of records.) 
+
 
 ## Artifact path
 
-Any path that is supported by MLRun can be used to store artifacts. However, only artifacts that are stored in paths that are system-configured as "allowed" in the MLRun service are visible in the UI. These are:
-- MLRun < 1.2: The allowed paths include only v3io paths
-- MLRun 1.2 and higher: Allows cloud storage paths &mdash; `v3io://`, `s3://`, `az://`, `gcs://`, `gs:// ` 
+Any path that is supported by MLRun can be used to store artifacts. However, only artifacts that are stored in paths that are 
+system-configured as "allowed" in the MLRun service are visible in the UI. These are:
+- MLRun < 1.2: The allowed paths include only V3IO paths
+- MLRun 1.2 and higher: Allows cloud storage paths &mdash; `v3io://`, `s3://`, `az://`, `gcs://`, `gs://`. <br>
+  `http://` paths are not visible due to security reasons.
+- MLRun 1.5 adds support for DBFS (Databricks file system): `dbfs://`
 
 Jobs use the default or job specific `artifact_path` parameter to determine where the artifacts are stored.
 The default `artifact_path` can be specified at the cluster level, client level, project level, or job level 
@@ -48,15 +68,15 @@ The default `artifact_path` can be specified at the cluster level, client level,
 You can set the default `artifact_path` for your environment using the {py:func}`~mlrun.set_environment` function.
 
 You can override the default `artifact_path` configuration by setting the `artifact_path` parameter of 
-the {py:func}`~mlrun.set_environment` function. You can use variables in the artifacts path, 
+the {py:class}`~mlrun.projects.MlrunProject` object, setting the artifact path for objects belonging to that project. You can use variables in the artifacts path, 
 such as `{{project}}` for the name of the running project or `{{run.uid}}` for the current job/pipeline run UID. 
 (The default artifacts path uses `{{project}}`.) The following example configures the artifacts path to an 
 artifacts directory in the current active directory (`./artifacts`)
 
-    set_environment(artifact_path='./artifacts')
+   `project.artifact_path='./artifacts'`
 
-```{admonition} For Iguazio MLOps Platform users
-In the platform, the default artifacts path is a <project name>/artifacts directory in the 
+```{admonition} For Iguazio AI Platform users
+In the platform, the default artifacts path is the <project name>/artifacts directory in the 
 predefined “projects” data container: `/v3io/projects/<project name>/artifacts`
 (for example, `/v3io/projects/myproject/artifacts` for a “myproject” project).
 ```
@@ -74,11 +94,12 @@ to a `training_artifacts` variable:
 
 ```python
 from os import path
-training_artifacts = path.join(artifact_path, 'training')
+
+training_artifacts = path.join(artifact_path, "training")
 ```
 
 ```{admonition} Note
-The artifacts path uses [data store URLs](./datastore.html#shared-data-stores), which are not necessarily local file paths 
+The artifacts path uses [data store URLs](./datastore.md), which are not necessarily local file paths 
 (for example, `s3://bucket/path`). Be careful not to use such paths with general file utilities.
 ```
 
@@ -114,10 +135,24 @@ Example artifact URLs:
 
 <!-- ## Dataset artifacts moved to data coll and prep, model and plot artifacts to working-with-data-and-model-artifacts -->
 
-## See also
+## Deleting artifacts
 
-- {ref}`working-with-data-and-model-artifacts`
-- {ref}`models`
-- {ref}`logging_datasets`
 
-[Back to top](#top)
+Artifacts are comprised of two parts: an artifact object that points to the artifact data; and the artifact data (files). You can delete artifacts from a specific project 
+and choose what you want to delete. You cannot delete artifacts of type: ModelArtifact, DirArtifact, or DatasetArtifact that has more than one file. 
+Deleting artifact data is supported for V3IO, Google, Azure, DBFS, Filestore, and S3. 
+
+
+The options for {py:meth}`~mlrun.projects.MlrunProject.delete_artifact`:
+- metadata-only: Delete only the artifact object. The related artifact data remains.
+- data-optional: Delete the artifact object and the data. If data deletion is unsuccessful, deletes only the object.
+- data-force: Delete the artifact object and the data. If data deletion is unsuccessful, the object is also not deleted.
+
+For example:
+```
+artifact = project.get_artifact("name")
+project.delete_artifact(artifact, deletion_strategy=mlrun.common.schemas.artifact.ArtifactsDeletionStrategies.data_force, secrets={"secret1": "user-secret"})
+```
+Be sure to include `secrets` if additional credentials are needed to access the artifact data beyond those already specified as project secrets. 
+
+[Back to top](#artifacts)

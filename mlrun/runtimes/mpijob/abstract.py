@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,19 +13,12 @@
 # limitations under the License.
 import abc
 import os
-import time
-import typing
-
-from kubernetes import client
+from typing import Optional
 
 from mlrun.config import config
-from mlrun.errors import err_to_str
-from mlrun.execution import MLClientCtx
-from mlrun.model import RunObject
 from mlrun.runtimes.kubejob import KubejobRuntime
 from mlrun.runtimes.pod import KubeResourceSpec
-from mlrun.runtimes.utils import RunError
-from mlrun.utils import get_in, logger
+from mlrun.utils import update_in
 
 
 class MPIResourceSpec(KubeResourceSpec):
@@ -61,6 +54,7 @@ class MPIResourceSpec(KubeResourceSpec):
         preemption_mode=None,
         security_context=None,
         clone_target_dir=None,
+        state_thresholds=None,
     ):
         super().__init__(
             command=command,
@@ -90,6 +84,7 @@ class MPIResourceSpec(KubeResourceSpec):
             preemption_mode=preemption_mode,
             security_context=security_context,
             clone_target_dir=clone_target_dir,
+            state_thresholds=state_thresholds,
         )
         self.mpi_args = mpi_args or [
             "-x",
@@ -114,171 +109,16 @@ class AbstractMPIJobRuntime(KubejobRuntime, abc.ABC):
     def spec(self, spec):
         self._spec = self._verify_dict(spec, "spec", MPIResourceSpec)
 
-    @abc.abstractmethod
-    def _generate_mpi_job(
-        self,
-        runobj: RunObject,
-        execution: MLClientCtx,
-        meta: client.V1ObjectMeta,
-    ) -> typing.Dict:
-        pass
-
-    @abc.abstractmethod
-    def _get_job_launcher_status(self, resp: list) -> str:
-        pass
-
     @staticmethod
-    @abc.abstractmethod
-    def _generate_pods_selector(name: str, launcher: bool) -> str:
-        pass
-
-    # should return the mpijob CRD information -> (group, version, plural)
-    @staticmethod
-    @abc.abstractmethod
-    def _get_crd_info() -> typing.Tuple[str, str, str]:
-        pass
-
-    def _pretty_print_jobs(self, items: typing.List):
-        print(f"{'status':10} {'name':20} {'start':21} end")
-        for i in items:
-            status = self._get_job_launcher_status(i)
-            name = get_in(i, "metadata.name", "")
-            start_time = get_in(i, "status.startTime", "")
-            end_time = get_in(i, "status.completionTime", "")
-            print(f"{status:10} {name:20} {start_time:21} {end_time}")
-
-    def _run(self, runobj: RunObject, execution: MLClientCtx):
-
-        if runobj.metadata.iteration:
-            self.store_run(runobj)
-
-        meta = self._get_meta(runobj, True)
-
-        self._add_secrets_to_spec_before_running(runobj)
-
-        job = self._generate_mpi_job(runobj, execution, meta)
-
-        resp = self._submit_mpijob(job, meta.namespace)
-
-        state = None
-        timeout = int(config.submit_timeout) or 120
-        for _ in range(timeout):
-            resp = self.get_job(meta.name, meta.namespace)
-            state = self._get_job_launcher_status(resp)
-            if resp and state:
-                break
-            time.sleep(1)
-
-        if resp:
-            logger.info(f"MpiJob {meta.name} state={state or 'unknown'}")
-            if state:
-                state = state.lower()
-                launcher, _ = self._get_launcher(meta.name, meta.namespace)
-                execution.set_hostname(launcher)
-                execution.set_state("running" if state == "active" else state)
-                txt = f"MpiJob {meta.name} launcher pod {launcher} state {state}"
-                logger.info(txt)
-                runobj.status.status_text = txt
-
-            else:
-                pods_phases = self.get_pods(meta.name, meta.namespace)
-                txt = f"MpiJob status unknown or failed, check pods: {pods_phases}"
-                logger.warning(txt)
-                runobj.status.status_text = txt
-
-        return None
-
-    def _submit_mpijob(self, job, namespace=None):
-        mpi_group, mpi_version, mpi_plural = self._get_crd_info()
-
-        k8s = self._get_k8s()
-        namespace = k8s.resolve_namespace(namespace)
-        try:
-            resp = k8s.crdapi.create_namespaced_custom_object(
-                mpi_group,
-                mpi_version,
-                namespace=namespace,
-                plural=mpi_plural,
-                body=job,
-            )
-            name = get_in(resp, "metadata.name", "unknown")
-            logger.info(f"MpiJob {name} created")
-            return resp
-        except client.rest.ApiException as exc:
-            logger.error(f"Exception when creating MPIJob: {err_to_str(exc)}")
-            raise RunError("Exception when creating MPIJob") from exc
-
-    def delete_job(self, name, namespace=None):
-        mpi_group, mpi_version, mpi_plural = self._get_crd_info()
-        k8s = self._get_k8s()
-        namespace = k8s.resolve_namespace(namespace)
-        try:
-            # delete the mpi job
-            body = client.V1DeleteOptions()
-            resp = k8s.crdapi.delete_namespaced_custom_object(
-                mpi_group, mpi_version, namespace, mpi_plural, name, body
-            )
-            deletion_status = get_in(resp, "status", "unknown")
-            logger.info(f"del status: {deletion_status}")
-        except client.rest.ApiException as exc:
-            print(f"Exception when deleting MPIJob: {err_to_str(exc)}")
-
-    def list_jobs(self, namespace=None, selector="", show=True):
-        mpi_group, mpi_version, mpi_plural = self._get_crd_info()
-        k8s = self._get_k8s()
-        namespace = k8s.resolve_namespace(namespace)
-        items = []
-        try:
-            resp = k8s.crdapi.list_namespaced_custom_object(
-                mpi_group,
-                mpi_version,
-                namespace,
-                mpi_plural,
-                watch=False,
-                label_selector=selector,
-            )
-        except client.exceptions.ApiException as exc:
-            print(f"Exception when reading MPIJob: {err_to_str(exc)}")
-            return items
-
-        if resp:
-            items = resp.get("items", [])
-            if show and items:
-                self._pretty_print_jobs(items)
-        return items
-
-    def get_job(self, name, namespace=None):
-        mpi_group, mpi_version, mpi_plural = self._get_crd_info()
-        k8s = self._get_k8s()
-        namespace = k8s.resolve_namespace(namespace)
-        try:
-            resp = k8s.crdapi.get_namespaced_custom_object(
-                mpi_group, mpi_version, namespace, mpi_plural, name
-            )
-        except client.exceptions.ApiException as exc:
-            print(f"Exception when reading MPIJob: {err_to_str(exc)}")
-            return None
-        return resp
-
-    def get_pods(self, name=None, namespace=None, launcher=False):
-        k8s = self._get_k8s()
-        namespace = k8s.resolve_namespace(namespace)
-
-        selector = self._generate_pods_selector(name, launcher)
-
-        pods = k8s.list_pods(selector=selector, namespace=namespace)
-        if pods:
-            return {p.metadata.name: p.status.phase for p in pods}
-
-    def _get_launcher(self, name, namespace=None):
-        pods = self.get_pods(name, namespace, launcher=True)
-        if not pods:
-            logger.error("no pod matches that job name")
-            return
-        return list(pods.items())[0]
+    def _get_run_completion_updates(run: dict) -> dict:
+        # TODO: add a 'workers' section in run objects state, each worker will update its state while
+        #  the run state will be resolved by the server.
+        # update the run object state if empty so that it won't default to 'created' state
+        update_in(run, "status.state", "running", append=False, replace=False)
+        return {}
 
     def with_tracing(
-        self, log_file_path: str = None, enable_cycle_markers: bool = False
+        self, log_file_path: Optional[str] = None, enable_cycle_markers: bool = False
     ):
         """Add Horovod Timeline activity tracking to the job to analyse
         its performance.
@@ -310,11 +150,11 @@ class AbstractMPIJobRuntime(KubejobRuntime, abc.ABC):
 
     def with_autotune(
         self,
-        log_file_path: str = None,
-        warmup_samples: int = None,
-        steps_per_sample: int = None,
-        bayes_opt_max_samples: int = None,
-        gaussian_process_noise: float = None,
+        log_file_path: Optional[str] = None,
+        warmup_samples: Optional[int] = None,
+        steps_per_sample: Optional[int] = None,
+        bayes_opt_max_samples: Optional[int] = None,
+        gaussian_process_noise: Optional[float] = None,
     ):
         """Adds an Autotuner to help optimize Horovod's Parameters for better performance.
 
@@ -356,17 +196,17 @@ class AbstractMPIJobRuntime(KubejobRuntime, abc.ABC):
         if steps_per_sample is not None:
             horovod_autotune_settings["autotune-steps-per-sample"] = steps_per_sample
         if bayes_opt_max_samples is not None:
-            horovod_autotune_settings[
-                "autotune-bayes-opt-max-samples"
-            ] = bayes_opt_max_samples
+            horovod_autotune_settings["autotune-bayes-opt-max-samples"] = (
+                bayes_opt_max_samples
+            )
         if gaussian_process_noise is not None:
-            horovod_autotune_settings[
-                "autotune-gaussian-process-noise"
-            ] = gaussian_process_noise
+            horovod_autotune_settings["autotune-gaussian-process-noise"] = (
+                gaussian_process_noise
+            )
 
         self.set_envs(horovod_autotune_settings)
 
-    def set_mpi_args(self, args: typing.List[str]) -> None:
+    def set_mpi_args(self, args: list[str]) -> None:
         """Sets the runtime's mpi arguments to args.
 
         Parameters
@@ -384,14 +224,14 @@ class AbstractMPIJobRuntime(KubejobRuntime, abc.ABC):
         ```
         # Define the wanted MPI arguments
         mpi_args = []
-        mpi_args.append('-x')
-        mpi_args.append('NCCL_DEBUG=INFO')
-        mpi_args.append('-x')
-        mpi_args.append('NCCL_SOCKET_NTHREADS=2')
-        mpi_args.append('-x')
-        mpi_args.append('NCCL_NSOCKS_PERTHREAD=8')
-        mpi_args.append('-x')
-        mpi_args.append('NCCL_MIN_NCHANNELS=4')
+        mpi_args.append("-x")
+        mpi_args.append("NCCL_DEBUG=INFO")
+        mpi_args.append("-x")
+        mpi_args.append("NCCL_SOCKET_NTHREADS=2")
+        mpi_args.append("-x")
+        mpi_args.append("NCCL_NSOCKS_PERTHREAD=8")
+        mpi_args.append("-x")
+        mpi_args.append("NCCL_MIN_NCHANNELS=4")
 
         # Set the MPI arguments in the function
         fn.set_mpi_args(mpi_args)

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ import typing
 
 import aiohttp
 
-import mlrun.api.schemas
+import mlrun.common.schemas
 import mlrun.errors
 import mlrun.lists
 
@@ -30,17 +30,41 @@ class GitNotification(NotificationBase):
     API/Client notification for setting a rich run statuses git issue comment (github/gitlab)
     """
 
+    @classmethod
+    def validate_params(cls, params):
+        git_repo = params.get("repo", None)
+        git_issue = params.get("issue", None)
+        git_merge_request = params.get("merge_request", None)
+        token = (
+            params.get("token", None)
+            or params.get("GIT_TOKEN", None)
+            or params.get("GITHUB_TOKEN", None)
+        )
+        if not git_repo:
+            raise ValueError("Parameter 'repo' is required for GitNotification")
+
+        if not token:
+            raise ValueError("Parameter 'token' is required for GitNotification")
+
+        if not git_issue and not git_merge_request:
+            raise ValueError(
+                "At least one of 'issue' or 'merge_request' is required for GitNotification"
+            )
+
     async def push(
         self,
         message: str,
-        severity: typing.Union[
-            mlrun.api.schemas.NotificationSeverity, str
-        ] = mlrun.api.schemas.NotificationSeverity.INFO,
-        runs: typing.Union[mlrun.lists.RunList, list] = None,
-        custom_html: str = None,
+        severity: typing.Optional[
+            typing.Union[mlrun.common.schemas.NotificationSeverity, str]
+        ] = mlrun.common.schemas.NotificationSeverity.INFO,
+        runs: typing.Optional[typing.Union[mlrun.lists.RunList, list]] = None,
+        custom_html: typing.Optional[typing.Optional[str]] = None,
+        alert: typing.Optional[mlrun.common.schemas.AlertConfig] = None,
+        event_data: typing.Optional[mlrun.common.schemas.Event] = None,
     ):
         git_repo = self.params.get("repo", None)
         git_issue = self.params.get("issue", None)
+        git_merge_request = self.params.get("merge_request", None)
         token = (
             self.params.get("token", None)
             or self.params.get("GIT_TOKEN", None)
@@ -49,9 +73,10 @@ class GitNotification(NotificationBase):
         server = self.params.get("server", None)
         gitlab = self.params.get("gitlab", False)
         await self._pr_comment(
-            self._get_html(message, severity, runs, custom_html),
+            self._get_html(message, severity, runs, custom_html, alert, event_data),
             git_repo,
             git_issue,
+            merge_request=git_merge_request,
             token=token,
             server=server,
             gitlab=gitlab,
@@ -60,10 +85,11 @@ class GitNotification(NotificationBase):
     @staticmethod
     async def _pr_comment(
         message: str,
-        repo: str = None,
-        issue: int = None,
-        token: str = None,
-        server: str = None,
+        repo: typing.Optional[str] = None,
+        issue: typing.Optional[int] = None,
+        merge_request: typing.Optional[int] = None,
+        token: typing.Optional[str] = None,
+        server: typing.Optional[str] = None,
         gitlab: bool = False,
     ) -> str:
         """push comment message to Git system PR/issue
@@ -89,12 +115,19 @@ class GitNotification(NotificationBase):
             headers = {"PRIVATE-TOKEN": token}
             repo = repo or os.environ.get("CI_PROJECT_ID")
             # auto detect GitLab pr id from the environment
-            issue = issue or os.environ.get("CI_MERGE_REQUEST_IID")
+            issue = issue or os.environ.get("CI_ISSUE_IID")
+            merge_request = merge_request or os.environ.get("CI_MERGE_REQUEST_IID")
             # replace slash with url encoded slash for GitLab to accept a repo name with slash
             repo = repo.replace("/", "%2F")
-            url = (
-                f"https://{server}/api/v4/projects/{repo}/merge_requests/{issue}/notes"
-            )
+
+            if merge_request:
+                url = f"https://{server}/api/v4/projects/{repo}/merge_requests/{merge_request}/notes"
+            elif issue:
+                url = f"https://{server}/api/v4/projects/{repo}/issues/{issue}/notes"
+            else:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    "GitLab issue or merge request id not specified"
+                )
         else:
             server = server or "api.github.com"
             repo = repo or os.environ.get("GITHUB_REPOSITORY")
@@ -104,11 +137,11 @@ class GitNotification(NotificationBase):
                 with open(os.environ["GITHUB_EVENT_PATH"]) as fp:
                     data = fp.read()
                     event = json.loads(data)
-                    if "issue" not in event:
+                    if "number" not in event:
                         raise mlrun.errors.MLRunInvalidArgumentError(
                             f"issue not found in github actions event\ndata={data}"
                         )
-                    issue = event["issue"].get("number")
+                    issue = event["number"]
             headers = {
                 "Accept": "application/vnd.github.v3+json",
                 "Authorization": f"token {token}",
@@ -120,7 +153,7 @@ class GitNotification(NotificationBase):
             if not resp.ok:
                 resp_text = await resp.text()
                 raise mlrun.errors.MLRunBadRequestError(
-                    f"Failed commenting on PR: {resp_text}", status=resp.status
+                    f"Failed commenting on PR: {resp_text}"
                 )
             data = await resp.json()
             return data.get("id")

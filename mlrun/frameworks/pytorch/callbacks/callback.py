@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Optional
 
 from torch import Tensor
 from torch.nn import Module
@@ -68,7 +68,7 @@ class Callback(ABC):
         validation_set: DataLoader = None,
         loss_function: Module = None,
         optimizer: Optimizer = None,
-        metric_functions: List[PyTorchTypes.MetricFunctionType] = None,
+        metric_functions: Optional[list[PyTorchTypes.MetricFunctionType]] = None,
         scheduler=None,
     ):
         """
@@ -141,7 +141,7 @@ class Callback(ABC):
         pass
 
     def on_validation_end(
-        self, loss_value: PyTorchTypes.MetricValueType, metric_values: List[float]
+        self, loss_value: PyTorchTypes.MetricValueType, metric_values: list[float]
     ) -> bool:
         """
         Before the validation (in a training case it will be per epoch) ends, this method will be called.
@@ -258,7 +258,7 @@ class Callback(ABC):
         """
         pass
 
-    def on_train_metrics_end(self, metric_values: List[PyTorchTypes.MetricValueType]):
+    def on_train_metrics_end(self, metric_values: list[PyTorchTypes.MetricValueType]):
         """
         After the training calculation of the metrics, this method will be called.
 
@@ -273,7 +273,7 @@ class Callback(ABC):
         pass
 
     def on_validation_metrics_end(
-        self, metric_values: List[PyTorchTypes.MetricValueType]
+        self, metric_values: list[PyTorchTypes.MetricValueType]
     ):
         """
         After the validating calculation of the metrics, this method will be called.

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ default_pkg_class = "sklearn.linear_model.LogisticRegression"
 
 @dsl.pipeline(name="Demo training pipeline", description="Shows how to use mlrun.")
 def kfpipeline(model_class=default_pkg_class, build=0):
-
     # if build=True, build the function image before the run
     with dsl.Condition(build == 1) as build_cond:
         funcs["prep-data"].deploy_step()
@@ -42,7 +41,7 @@ def kfpipeline(model_class=default_pkg_class, build=0):
 
     # train the model using a library (hub://) function and the generated data
     # no need to define handler in this step because the train function is the default handler
-    train = funcs["auto_trainer"].as_step(
+    train = funcs["auto-trainer"].as_step(
         name="train",
         inputs={"dataset": prep_data.outputs["cleaned_data"]},
         params={
@@ -53,7 +52,7 @@ def kfpipeline(model_class=default_pkg_class, build=0):
     )
 
     # test the model using a library (hub://) function and the generated model
-    funcs["auto_trainer"].as_step(
+    funcs["auto-trainer"].as_step(
         name="test",
         handler="evaluate",
         params={"label_columns": "label", "model": train.outputs["model"]},

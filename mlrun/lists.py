@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,9 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import warnings
 from copy import copy
-from typing import List
+from typing import Optional
 
 import pandas as pd
 
@@ -23,7 +22,7 @@ import mlrun.frameworks
 from .artifacts import Artifact, dict_to_artifact
 from .config import config
 from .render import artifacts_to_html, runs_to_html
-from .utils import flatten, get_artifact_target, get_in, is_legacy_artifact
+from .utils import flatten, get_artifact_target, get_in
 
 list_header = [
     "project",
@@ -31,12 +30,14 @@ list_header = [
     "iter",
     "start",
     "state",
+    "kind",
     "name",
     "labels",
     "inputs",
     "parameters",
     "results",
     "artifacts",
+    "artifact_uris",
     "error",
 ]
 
@@ -58,12 +59,14 @@ class RunList(list):
                 get_in(run, "metadata.iteration", ""),
                 get_in(run, "status.start_time", ""),
                 get_in(run, "status.state", ""),
+                get_in(run, "step_kind", get_in(run, "kind", "")),
                 get_in(run, "metadata.name", ""),
                 get_in(run, "metadata.labels", ""),
                 get_in(run, "spec.inputs", ""),
                 get_in(run, "spec.parameters", ""),
                 get_in(run, "status.results", ""),
                 get_in(run, "status.artifacts", []),
+                get_in(run, "status.artifact_uris", {}),
                 get_in(run, "status.error", ""),
             ]
             if extend_iterations and iterations:
@@ -92,7 +95,9 @@ class RunList(list):
 
         return [list_header] + rows
 
-    def to_df(self, flat=False, extend_iterations=False, cache=True):
+    def to_df(
+        self, flat: bool = False, extend_iterations: bool = False, cache: bool = True
+    ) -> pd.DataFrame:
         """convert the run list to a dataframe"""
         if hasattr(self, "_df") and cache:
             return self._df
@@ -118,18 +123,18 @@ class RunList(list):
         if not display:
             return html
 
-    def to_objects(self) -> List["mlrun.RunObject"]:
+    def to_objects(self) -> list["mlrun.RunObject"]:
         """Return a list of Run Objects"""
         return [mlrun.RunObject.from_dict(run) for run in self]
 
     def compare(
         self,
         hide_identical: bool = True,
-        exclude: list = None,
-        show: bool = None,
+        exclude: Optional[list] = None,
+        show: Optional[bool] = None,
         extend_iterations=True,
         filename=None,
-        colorscale: str = None,
+        colorscale: Optional[str] = None,
     ):
         """return/show parallel coordinates plot + table to compare between the list of runs
 
@@ -179,10 +184,16 @@ class ArtifactList(list):
             "producer": ["producer", "spec.producer"],
             "sources": ["sources", "spec.sources"],
             "labels": ["labels", "metadata.labels"],
+            # important: the uri item must be the last one in this dict since there is no artifact.uri, and we fill it
+            # in the following for loop as the "last_index" in the dict
+            "uri": ["uri", "uri"],
         }
         for artifact in self:
-            fields_index = 0 if is_legacy_artifact(artifact) else 1
+            fields_index = 1
             row = [get_in(artifact, v[fields_index], "") for k, v in head.items()]
+            artifact_uri = dict_to_artifact(artifact).uri
+            last_index = len(row) - 1
+            row[last_index] = artifact_uri
             rows.append(row)
 
         return [head.keys()] + rows
@@ -208,21 +219,11 @@ class ArtifactList(list):
         if not display:
             return html
 
-    def to_objects(self) -> List[Artifact]:
+    def to_objects(self) -> list[Artifact]:
         """return as a list of artifact objects"""
         return [dict_to_artifact(artifact) for artifact in self]
 
-    def objects(self) -> List[Artifact]:
-        """return as a list of artifact objects"""
-        warnings.warn(
-            "'objects' is deprecated in 1.3.0 and will be removed in 1.5.0. "
-            "Use 'to_objects' instead.",
-            # TODO: remove in 1.5.0
-            FutureWarning,
-        )
-        return [dict_to_artifact(artifact) for artifact in self]
-
-    def dataitems(self) -> List["mlrun.DataItem"]:
+    def dataitems(self) -> list["mlrun.DataItem"]:
         """return as a list of DataItem objects"""
         dataitems = []
         for item in self:
@@ -230,9 +231,3 @@ class ArtifactList(list):
             if artifact:
                 dataitems.append(mlrun.get_dataitem(artifact))
         return dataitems
-
-
-class FunctionList(list):
-    def __init__(self):
-        pass
-        # TODO

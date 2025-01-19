@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
 import json
 import os
 import pathlib
+import random
 import time
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -24,7 +26,7 @@ from sklearn.datasets import load_iris
 
 import mlrun
 from mlrun.runtimes import nuclio_init_hook
-from mlrun.runtimes.serving import serving_subkind
+from mlrun.runtimes.nuclio.serving import serving_subkind
 from mlrun.serving import V2ModelServer
 from mlrun.serving.server import (
     GraphContext,
@@ -84,10 +86,10 @@ ensemble_object_classification.routes = generate_test_routes_classification(
 )
 
 
-def generate_spec(graph, mode="sync", params={}):
+def generate_spec(graph, mode="sync", params=None):
     return {
         "version": "v2",
-        "parameters": params,
+        "parameters": params or {},
         "graph": graph,
         "load_mode": mode,
         "verbose": True,
@@ -125,7 +127,19 @@ spec = generate_spec(router_object.to_dict())
 ensemble_spec = generate_spec(ensemble_object.to_dict())
 ensemble_spec_classification = generate_spec(ensemble_object_classification.to_dict())
 testdata = '{"inputs": [5]}'
+testdata_iris = '{"inputs": [5.1, 3.5, 1.4, 0.2]}'
+testdata_iris_dict = (
+    '{"inputs": {"sepal width (cm)": 3.5, "sepal length (cm)": 5.1, '
+    '"petal width (cm)": 0.2, "petal length (cm)": 1.4}}'
+)
+testdata_iris_dict_error = (
+    '{"inputs": {"sepal width (cm)": 3.5, '
+    '"petal width (cm)": 0.2, "petal length (cm)": 1.4}}'
+)
 testdata_2 = '{"inputs": [5, 5]}'
+testdata_20 = (
+    '{"inputs": [5, 5, 10, 2, 3, 5, 5, 10, 2, 3, 5, 5, 10, 2, 3, 5, 5, 10, 2, 3]}'
+)
 
 
 def _log_model(project):
@@ -214,6 +228,7 @@ def init_ctx(
             spec["graph"]["class_args"][extra_class_args_names[i]] = extra_class_args[i]
     os.environ["SERVING_SPEC_ENV"] = json.dumps(spec)
     context = context or GraphContext()
+    context.is_mock = True
     nuclio_init_hook(context, globals(), serving_subkind)
     return context
 
@@ -239,11 +254,14 @@ def test_ensemble_get_models():
     )
     graph.routes = generate_test_routes("EnsembleModelTestingClass")
     server = fn.to_mock_server()
-    logger.info(f"flow: {graph.to_yaml()}")
     resp = server.test("/v2/models/")
     # expected: {"models": ["m1", "m2", "m3:v1", "m3:v2", "VotingEnsemble"],
     #           "weights": None}
     assert len(resp["models"]) == 5, f"wrong get models response {resp}"
+
+    assert fn.spec.graph.name == "VotingEnsemble"
+    fn_dict = fn.to_dict()
+    assert fn_dict.get("spec", {}).get("graph", {}).get("name", "") == "VotingEnsemble"
 
 
 def test_ensemble_get_metadata_of_models():
@@ -256,7 +274,6 @@ def test_ensemble_get_metadata_of_models():
     )
     graph.routes = generate_test_routes("EnsembleModelTestingClass")
     server = fn.to_mock_server()
-    logger.info(f"flow: {graph.to_yaml()}")
     resp = server.test("/v2/models/m1")
     expected = {"name": "m1", "version": "", "inputs": [], "outputs": []}
     assert resp == expected, f"wrong get models response {resp}"
@@ -270,7 +287,7 @@ def test_ensemble_get_metadata_of_models():
     expected = {"name": "VotingEnsemble", "version": "v1", "inputs": [], "outputs": []}
     assert resp == expected, f"wrong get models response {resp}"
 
-    mlrun.deploy_function(fn, dashboard="bad-address", mock=True)
+    mlrun.deploy_function(fn, mock=True)
     resp = fn.invoke("/v2/models/m1")
     expected = {"name": "m1", "version": "", "inputs": [], "outputs": []}
     assert resp == expected, f"wrong get models response {resp}"
@@ -451,6 +468,7 @@ def test_v2_stream_mode():
 def test_v2_raised_err():
     os.environ["SERVING_SPEC_ENV"] = json.dumps(raiser_spec)
     context = GraphContext()
+    context.is_mock = True
     nuclio_init_hook(context, globals(), serving_subkind)
 
     event = MockEvent(testdata, path="/v2/models/m6/infer")
@@ -463,6 +481,7 @@ def test_v2_async_mode():
     # model loading is async
     os.environ["SERVING_SPEC_ENV"] = json.dumps(asyncspec)
     context = GraphContext()
+    context.is_mock = True
     nuclio_init_hook(context, globals(), serving_subkind)
     context.logger.info("model initialized")
 
@@ -530,6 +549,30 @@ def test_v2_get_modelmeta(rundb_mock):
         server.test("/v2/models/m4", method="GET")
 
 
+def test_v2_infer_dict(rundb_mock):
+    project = mlrun.new_project("tstsrv", save=False)
+    fn = mlrun.new_function("tst", kind="serving")
+    model_uri = _log_model(project)
+    print(model_uri)
+    fn.add_model("m1", model_uri, "ModelTestingClass", multiplier=100)
+
+    server = fn.to_mock_server()
+    resp_list_1 = server.test("/v2/models/m1/infer", testdata_iris)
+    resp_list_2 = server.test("/v2/models/m1/predict", testdata_iris)
+    resp_dict = server.test("/v2/models/m1/infer_dict", testdata_iris_dict)
+    assert (
+        resp_dict.get("outputs")
+        == resp_list_1.get("outputs")
+        == resp_list_2.get("outputs")
+    )
+
+    with pytest.raises(RuntimeError):
+        server.test("/v2/models/m1/infer_dict", testdata_iris)
+
+    with pytest.raises(RuntimeError):
+        server.test("/v2/models/m1/infer_dict", testdata_iris_dict_error)
+
+
 def test_v2_custom_handler():
     context = init_ctx()
     event = MockEvent('{"test": "ok"}', path="/v2/models/m1/myop")
@@ -556,6 +599,8 @@ def test_v2_model_ready():
     event = MockEvent("", path="/v2/models/m1/ready", method="GET")
     resp = context.mlrun_handler(context, event)
     assert resp.status_code == 200, f"didnt get proper ready resp {resp.body}"
+    resp_body = resp.body.decode("utf-8")
+    assert resp_body == f"Model m1 is ready (event_id = {event.id})"
 
 
 def test_v2_health():
@@ -573,11 +618,14 @@ def test_v2_health():
 
 
 def test_v2_mock():
-    host = create_graph_server(graph=RouterStep())
+    host = create_graph_server(
+        graph=RouterStep(),
+        function_uri="proj/abc",
+    )
     host.graph.add_route(
         "my", class_name=ModelTestingClass, model_path="", multiplier=100
     )
-    host.init_states(None, namespace=globals())
+    host.init_states(None, namespace=globals(), is_mock=True)
     host.init_object(globals())
     logger.info(host.to_yaml())
     resp = host.test("/v2/models/my/infer", testdata)
@@ -586,20 +634,68 @@ def test_v2_mock():
     assert resp["outputs"] == 5 * 100, f"wrong health response {resp}"
 
 
-def test_function():
+def test_function(rundb_mock):
     fn = mlrun.new_function("tests", kind="serving")
-    graph = fn.set_topology("router")
+    fn.set_topology("router")
     fn.add_model("my", ".", class_name=ModelTestingClass(multiplier=100))
     fn.set_tracking("dummy://")  # track using the _DummyStream
 
     server = fn.to_mock_server()
-    logger.info(f"flow: {graph.to_yaml()}")
     resp = server.test("/v2/models/my/infer", testdata)
     # expected: source (5) * multiplier (100)
     assert resp["outputs"] == 5 * 100, f"wrong data response {resp}"
 
     dummy_stream = server.context.stream.output_stream
     assert len(dummy_stream.event_list) == 1, "expected stream to get one message"
+
+
+def test_sampling_percentage(rundb_mock):
+    fn = mlrun.new_function("tests", kind="serving")
+    fn.set_topology("router")
+    fn.add_model("my", ".", class_name=ModelTestingClass(multiplier=100))
+    random.seed(0)
+    random_sample_percentage = 50
+
+    with pytest.raises(mlrun.errors.MLRunInvalidArgumentError) as err:
+        fn.set_tracking(stream_path="dummy://", sampling_percentage=101)
+        assert (
+            str(err.value)
+            == "`sampling_percentage` must be greater than 0 and less or equal to 100."
+        )
+
+    with pytest.raises(mlrun.errors.MLRunInvalidArgumentError) as err:
+        fn.set_tracking(stream_path="dummy://", sampling_percentage=0)
+        assert (
+            str(err.value)
+            == "`sampling_percentage` must be greater than 0 and less or equal to 100."
+        )
+
+    fn.set_tracking(
+        stream_path="dummy://", sampling_percentage=random_sample_percentage
+    )
+    server = fn.to_mock_server()
+    for i in range(500):
+        server.test("/v2/models/my/infer", testdata)
+    assert (
+        (len(server.context.stream.output_stream.event_list)) == 241
+    ), (
+        "expected stream to get 241 messages"
+    )  # On seed 0, 241 is the expected value for 50% sample rate on 500 events
+
+    # Let's test it again, this time using inputs that include 20 features
+    for i in range(500):
+        server.test("/v2/models/my/infer", testdata_20)
+    assert (
+        (len(server.context.stream.output_stream.event_list)) == 508
+    ), (
+        "expected stream to get 508 messages"
+    )  # On seed 0, 508 is the expected value for 50% sample rate on 1,000 events
+
+    # Validate that the effective_sample_count is set correctly
+    assert (
+        server.context.stream.output_stream.event_list[-1]["effective_sample_count"]
+        == 1
+    )
 
 
 def test_serving_no_router():
@@ -653,18 +749,18 @@ def test_mock_deploy():
     mlrun.mlconf.mock_nuclio_deployment = ""
 
     # test mock deployment is working
-    mlrun.deploy_function(fn, dashboard="bad-address", mock=True)
+    mlrun.deploy_function(fn, mock=True)
     resp = fn.invoke("/v2/models/my/infer", testdata)
     assert resp["outputs"] == 5 * 100, f"wrong data response {resp}"
 
     # test mock deployment is working via project object
-    project.deploy_function(fn, dashboard="bad-address", mock=True)
+    project.deploy_function(fn, mock=True)
     resp = fn.invoke("/v2/models/my/infer", testdata)
     assert resp["outputs"] == 5 * 100, f"wrong data response {resp}"
 
     # test that it tries real deployment when turned off
     with pytest.raises(Exception):
-        mlrun.deploy_function(fn, dashboard="bad-address")
+        mlrun.deploy_function(fn)
         fn.invoke("/v2/models/my/infer", testdata)
 
     # set the mock through the config
@@ -714,3 +810,35 @@ def test_mock_invoke():
 
     # return config valued
     mlrun.mlconf.mock_nuclio_deployment = mock_nuclio_config
+
+
+def test_updating_model():
+    fn = mlrun.new_function("tests", kind="serving")
+    fn.add_model("my", ".", class_name=ModelTestingClass(multiplier=100))
+    server = fn.to_mock_server()
+    resp = server.test("/v2/models/my/infer", testdata)
+    assert resp["outputs"] == 5 * 100, f"wrong data response {resp}"
+
+    with patch("mlrun.utils.helpers.logger.info") as mock_warning:
+        # update the model
+        fn.add_model("my", ".", class_name=ModelTestingClass(multiplier=200))
+        mock_warning.assert_called_with("Model my already exists, updating it.")
+        server = fn.to_mock_server()
+        resp = server.test("/v2/models/my/infer", testdata)
+        assert resp["outputs"] == 5 * 200, f"wrong data response {resp}"
+
+
+def test_add_route_exceeds_max_models():
+    """Test adding a route when the maximum number of models is exceeded."""
+    server = create_graph_server(graph=RouterStep())
+    max_models = mlrun.serving.states.MAX_MODELS_PER_ROUTER
+    with pytest.raises(mlrun.errors.MLRunModelLimitExceededError):
+        for key in range(max_models + 1):
+            server.graph.add_route(f"test_key_{key}", class_name=ModelTestingClass)
+
+    # edit existing model
+    server.graph.add_route(f"test_key_{key-1}", class_name=ModelTestingClass)
+
+    assert (
+        len(server.graph.routes) == max_models
+    ), f"expected to have {max_models} models"

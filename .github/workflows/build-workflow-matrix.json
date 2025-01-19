@@ -5,9 +5,9 @@
     "include-suffix":""
   },
   {
-    "image-name":"mlrun",
-    "python-version":"3.7",
-    "include-suffix":"true"
+    "image-name":"mlrun-kfp",
+    "python-version":"3.9",
+    "include-suffix":""
   },
   {
     "image-name":"api",
@@ -20,29 +20,9 @@
     "include-suffix":""
   },
   {
-    "image-name":"base",
-    "python-version":"3.7",
-    "include-suffix":"true"
-  },
-  {
-    "image-name":"models",
+    "image-name": "mlrun-gpu",
     "python-version":"3.9",
     "include-suffix":""
-  },
-  {
-    "image-name":"models",
-    "python-version":"3.7",
-    "include-suffix":"true"
-  },
-  {
-    "image-name":"models-gpu",
-    "python-version":"3.9",
-    "include-suffix":""
-  },
-  {
-    "image-name":"models-gpu",
-    "python-version":"3.7",
-    "include-suffix":"true"
   },
   {
     "image-name":"jupyter",

@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,15 +19,16 @@ import kfp
 import kfp.compiler
 import pytest
 
+import mlrun.common.constants as mlrun_constants
 import mlrun.utils
 from mlrun import (
     _run_pipeline,
     code_to_function,
-    mount_v3io,
     new_task,
     wait_for_pipeline_completion,
 )
-from mlrun.run import RunStatuses
+from mlrun.runtimes.mounts import mount_v3io
+from mlrun_pipelines.common.models import RunStatuses
 from tests.system.base import TestMLRunSystem
 
 
@@ -43,7 +44,7 @@ class TestDask(TestMLRunSystem):
             filename=str(self.assets_path / "dask_function.py"),
         ).apply(mount_v3io())
 
-        self.dask_function.spec.image = "mlrun/ml-models"
+        self.dask_function.spec.image = "mlrun/mlrun"
         self.dask_function.spec.remote = True
         self.dask_function.spec.replicas = 1
         self.dask_function.spec.service_type = "NodePort"
@@ -62,8 +63,12 @@ class TestDask(TestMLRunSystem):
             name="mydask-main",
             project=self.project_name,
             labels={
-                "v3io_user": self._test_env["V3IO_USERNAME"],
-                "owner": self._test_env["V3IO_USERNAME"],
+                mlrun_constants.MLRunInternalLabels.v3io_user: self._test_env[
+                    "V3IO_USERNAME"
+                ],
+                mlrun_constants.MLRunInternalLabels.owner: self._test_env[
+                    "V3IO_USERNAME"
+                ],
             },
         )
         self._verify_run_spec(
@@ -80,7 +85,6 @@ class TestDask(TestMLRunSystem):
     def test_run_pipeline(self):
         @kfp.dsl.pipeline(name="dask_pipeline")
         def dask_pipe(x=1, y=10):
-
             # use_db option will use a function (DB) pointer instead of adding the function spec to the YAML
             self.dask_function.as_step(
                 new_task(handler="main", name="dask_pipeline", params={"x": x, "y": y}),
@@ -114,8 +118,12 @@ class TestDask(TestMLRunSystem):
             name="mydask-main",
             project=self.project_name,
             labels={
-                "v3io_user": self._test_env["V3IO_USERNAME"],
-                "owner": self._test_env["V3IO_USERNAME"],
+                mlrun_constants.MLRunInternalLabels.v3io_user: self._test_env[
+                    "V3IO_USERNAME"
+                ],
+                mlrun_constants.MLRunInternalLabels.owner: self._test_env[
+                    "V3IO_USERNAME"
+                ],
             },
         )
         self._verify_run_spec(
@@ -151,7 +159,7 @@ class TestDask(TestMLRunSystem):
         # wait for the dask cluster to completely shut down
         mlrun.utils.retry_until_successful(
             5,
-            60,
+            5 * 60,
             self._logger,
             True,
             self._wait_for_dask_cluster_to_shutdown,
@@ -163,7 +171,7 @@ class TestDask(TestMLRunSystem):
             client.list_datasets()
 
         # Cluster supposed to be decommissioned
-        with pytest.raises(RuntimeError):
+        with pytest.raises(AttributeError):
             client.restart()
 
     def _wait_for_dask_cluster_to_shutdown(self, dask_cluster_name):
@@ -175,6 +183,10 @@ class TestDask(TestMLRunSystem):
         resources = runtime_resources[0].resources
         # Waiting for workers to be removed and scheduler status to completed
         if len(resources.pod_resources) > 1:
+            self._logger.info(
+                "Waiting for cluster to shut down",
+                pod_resources=resources.pod_resources,
+            )
             raise mlrun.errors.MLRunRuntimeError("Cluster did not completely clean up")
 
         for pod in resources.pod_resources:

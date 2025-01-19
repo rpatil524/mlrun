@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,6 @@ def vault_func(context, secrets: list):
     context.logger.info("running function")
     for sec_name in secrets:
         sec_value = context.get_secret(sec_name)
-        context.logger.info("Secret name: {}, value: {}".format(sec_name, sec_value))
+        context.logger.info(f"Secret name: {sec_name}, value: {sec_value}")
 
     return True

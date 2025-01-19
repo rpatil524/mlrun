@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,33 +13,48 @@
 # limitations under the License.
 
 import time
+from typing import Optional
 
 import boto3
-import fsspec
+from boto3.s3.transfer import TransferConfig
+from fsspec.registry import get_filesystem_class
 
 import mlrun.errors
 
-from .base import DataStore, FileStats, get_range
+from .base import DataStore, FileStats, get_range, make_datastore_schema_sanitizer
 
 
 class S3Store(DataStore):
-    def __init__(self, parent, schema, name, endpoint="", secrets: dict = None):
+    using_bucket = True
+
+    def __init__(
+        self, parent, schema, name, endpoint="", secrets: Optional[dict] = None
+    ):
         super().__init__(parent, name, schema, endpoint, secrets)
         # will be used in case user asks to assume a role and work through fsspec
         self._temp_credentials = None
         region = None
 
-        access_key = self._get_secret_or_env("AWS_ACCESS_KEY_ID")
+        self.headers = None
+
+        access_key_id = self._get_secret_or_env("AWS_ACCESS_KEY_ID")
         secret_key = self._get_secret_or_env("AWS_SECRET_ACCESS_KEY")
+        token_file = self._get_secret_or_env("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
         endpoint_url = self._get_secret_or_env("S3_ENDPOINT_URL")
         force_non_anonymous = self._get_secret_or_env("S3_NON_ANONYMOUS")
         profile_name = self._get_secret_or_env("AWS_PROFILE")
         assume_role_arn = self._get_secret_or_env("MLRUN_AWS_ROLE_ARN")
 
+        self.config = TransferConfig(
+            multipart_threshold=1024 * 1024 * 25,
+            max_concurrency=10,
+            multipart_chunksize=1024 * 1024 * 25,
+        )
+
         # If user asks to assume a role, this needs to go through the STS client and retrieve temporary creds
         if assume_role_arn:
             client = boto3.client(
-                "sts", aws_access_key_id=access_key, aws_secret_access_key=secret_key
+                "sts", aws_access_key_id=access_key_id, aws_secret_access_key=secret_key
             )
             self._temp_credentials = client.assume_role(
                 RoleArn=assume_role_arn, RoleSessionName="assumeRoleSession"
@@ -70,11 +85,11 @@ class S3Store(DataStore):
             )
             return
 
-        if access_key or secret_key or force_non_anonymous:
+        if access_key_id or secret_key or force_non_anonymous:
             self.s3 = boto3.resource(
                 "s3",
                 region_name=region,
-                aws_access_key_id=access_key,
+                aws_access_key_id=access_key_id,
                 aws_secret_access_key=secret_key,
                 endpoint_url=endpoint_url,
             )
@@ -83,51 +98,68 @@ class S3Store(DataStore):
             self.s3 = boto3.resource(
                 "s3", region_name=region, endpoint_url=endpoint_url
             )
-            # If not using credentials, boto will still attempt to sign the requests, and will fail any operations
-            # due to no credentials found. These commands disable signing and allow anonymous mode (same as
-            # anon in the storage_options when working with fsspec).
-            from botocore.handlers import disable_signing
+            if not token_file:
+                # If not using credentials, boto will still attempt to sign the requests, and will fail any operations
+                # due to no credentials found. These commands disable signing and allow anonymous mode (same as
+                # anon in the storage_options when working with fsspec).
+                from botocore.handlers import disable_signing
 
-            self.s3.meta.client.meta.events.register(
-                "choose-signer.s3.*", disable_signing
-            )
+                self.s3.meta.client.meta.events.register(
+                    "choose-signer.s3.*", disable_signing
+                )
 
-    def get_filesystem(self, silent=False):
+    def get_spark_options(self):
+        res = {}
+        st = self.get_storage_options()
+        if st.get("key"):
+            res["spark.hadoop.fs.s3a.access.key"] = st.get("key")
+        if st.get("secret"):
+            res["spark.hadoop.fs.s3a.secret.key"] = st.get("secret")
+        if st.get("endpoint_url"):
+            res["spark.hadoop.fs.s3a.endpoint"] = st.get("endpoint_url")
+        if st.get("profile"):
+            res["spark.hadoop.fs.s3a.aws.profile"] = st.get("profile")
+        return res
+
+    @property
+    def filesystem(self):
         """return fsspec file system object, if supported"""
         if self._filesystem:
             return self._filesystem
         try:
             import s3fs  # noqa
         except ImportError as exc:
-            if not silent:
-                raise ImportError(
-                    "AWS s3fs not installed, run pip install s3fs"
-                ) from exc
-            return None
-        self._filesystem = fsspec.filesystem("s3", **self.get_storage_options())
+            raise ImportError("AWS s3fs not installed") from exc
+        filesystem_class = get_filesystem_class(protocol=self.kind)
+        self._filesystem = make_datastore_schema_sanitizer(
+            filesystem_class,
+            using_bucket=self.using_bucket,
+            **self.get_storage_options(),
+        )
         return self._filesystem
 
     def get_storage_options(self):
+        force_non_anonymous = self._get_secret_or_env("S3_NON_ANONYMOUS")
+        profile = self._get_secret_or_env("AWS_PROFILE")
+        endpoint_url = self._get_secret_or_env("S3_ENDPOINT_URL")
+        access_key_id = self._get_secret_or_env("AWS_ACCESS_KEY_ID")
+        secret = self._get_secret_or_env("AWS_SECRET_ACCESS_KEY")
+        token_file = self._get_secret_or_env("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+
         if self._temp_credentials:
-            key = self._temp_credentials["AccessKeyId"]
+            access_key_id = self._temp_credentials["AccessKeyId"]
             secret = self._temp_credentials["SecretAccessKey"]
             token = self._temp_credentials["SessionToken"]
         else:
-            key = self._get_secret_or_env("AWS_ACCESS_KEY_ID")
-            secret = self._get_secret_or_env("AWS_SECRET_ACCESS_KEY")
             token = None
 
-        force_non_anonymous = self._get_secret_or_env("S3_NON_ANONYMOUS")
-        profile = self._get_secret_or_env("AWS_PROFILE")
-
         storage_options = dict(
-            anon=not (force_non_anonymous or (key and secret)),
-            key=key,
+            anon=not (force_non_anonymous or (access_key_id and secret) or token_file),
+            key=access_key_id,
             secret=secret,
             token=token,
         )
 
-        endpoint_url = self._get_secret_or_env("S3_ENDPOINT_URL")
         if endpoint_url:
             client_kwargs = {"endpoint_url": endpoint_url}
             storage_options["client_kwargs"] = client_kwargs
@@ -135,38 +167,57 @@ class S3Store(DataStore):
         if profile:
             storage_options["profile"] = profile
 
-        return storage_options
+        return self._sanitize_storage_options(storage_options)
+
+    @property
+    def spark_url(self):
+        return f"s3a://{self.endpoint}"
+
+    def get_bucket_and_key(self, key):
+        path = self._join(key)[1:]
+        return self.endpoint, path
 
     def upload(self, key, src_path):
-        self.s3.Object(self.endpoint, self._join(key)[1:]).put(
-            Body=open(src_path, "rb")
-        )
+        bucket, key = self.get_bucket_and_key(key)
+        self.s3.Bucket(bucket).upload_file(src_path, key, Config=self.config)
 
     def get(self, key, size=None, offset=0):
-        obj = self.s3.Object(self.endpoint, self._join(key)[1:])
+        bucket, key = self.get_bucket_and_key(key)
+        obj = self.s3.Object(bucket, key)
         if size or offset:
             return obj.get(Range=get_range(size, offset))["Body"].read()
         return obj.get()["Body"].read()
 
     def put(self, key, data, append=False):
-        self.s3.Object(self.endpoint, self._join(key)[1:]).put(Body=data)
+        data, _ = self._prepare_put_data(data, append)
+        bucket, key = self.get_bucket_and_key(key)
+        self.s3.Object(bucket, key).put(Body=data)
 
     def stat(self, key):
-        obj = self.s3.Object(self.endpoint, self._join(key)[1:])
+        bucket, key = self.get_bucket_and_key(key)
+        obj = self.s3.Object(bucket, key)
         size = obj.content_length
         modified = obj.last_modified
         return FileStats(size, time.mktime(modified.timetuple()))
 
     def listdir(self, key):
+        bucket, key = self.get_bucket_and_key(key)
         if not key.endswith("/"):
             key += "/"
         # Object names is S3 are not fully following filesystem semantics - they do not start with /, even for
-        # "absolute paths". Therefore, we are are removing leading / from path filter.
+        # "absolute paths". Therefore, we are removing leading / from path filter.
         if key.startswith("/"):
             key = key[1:]
         key_length = len(key)
-        bucket = self.s3.Bucket(self.endpoint)
+        bucket = self.s3.Bucket(bucket)
         return [obj.key[key_length:] for obj in bucket.objects.filter(Prefix=key)]
+
+    def rm(self, path, recursive=False, maxdepth=None):
+        bucket, key = self.get_bucket_and_key(path)
+        path = f"{bucket}/{key}"
+        #  In order to raise an error if there is connection error, ML-7056.
+        self.filesystem.exists(path=path)
+        self.filesystem.rm(path=path, recursive=recursive, maxdepth=maxdepth)
 
 
 def parse_s3_bucket_and_key(s3_path):

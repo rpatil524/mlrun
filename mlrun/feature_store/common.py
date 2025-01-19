@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,12 +16,13 @@ from copy import copy
 
 import mlrun
 import mlrun.errors
-from mlrun.api.schemas import AuthorizationVerificationInput
+from mlrun.common.schemas import AuthorizationVerificationInput
 from mlrun.runtimes import BaseRuntime
 from mlrun.runtimes.function_reference import FunctionReference
 from mlrun.runtimes.utils import enrich_function_from_dict
-from mlrun.utils import StorePrefix, logger, mlconf, parse_versioned_object_uri
+from mlrun.utils import StorePrefix, logger
 
+from ..common.helpers import parse_versioned_object_uri
 from ..config import config
 
 project_separator = "/"
@@ -36,17 +37,12 @@ def parse_feature_string(feature):
         raise mlrun.errors.MLRunInvalidArgumentError(
             f"feature {feature} must be {expected_message}"
         )
-    splitted = feature.split(feature_separator)
-    if len(splitted) > 2:
-        raise mlrun.errors.MLRunInvalidArgumentError(
-            f"feature {feature} must be {expected_message}, cannot have more than one '.'"
-        )
-    feature_set = splitted[0]
-    feature_name = splitted[1]
-    splitted = feature_name.split(" as ")
-    if len(splitted) > 1:
-        return feature_set.strip(), splitted[0].strip(), splitted[1].strip()
-    return feature_set.strip(), feature_name.strip(), None
+    feature_set, feature_name = feature.rsplit(feature_separator, 1)
+    feature_set = feature_set.strip()
+    split_result = feature_name.split(" as ", 1)
+    feature_name = split_result[0].strip()
+    alias = split_result[1].strip() if len(split_result) > 1 else None
+    return feature_set, feature_name, alias
 
 
 def parse_project_name_from_feature_string(feature):
@@ -86,13 +82,13 @@ def get_feature_set_by_uri(uri, project=None):
     db = mlrun.get_run_db()
     project, name, tag, uid = parse_feature_set_uri(uri, project)
     resource = (
-        mlrun.api.schemas.AuthorizationResourceTypes.feature_set.to_resource_string(
+        mlrun.common.schemas.AuthorizationResourceTypes.feature_set.to_resource_string(
             project, "feature-set"
         )
     )
 
     auth_input = AuthorizationVerificationInput(
-        resource=resource, action=mlrun.api.schemas.AuthorizationAction.read
+        resource=resource, action=mlrun.common.schemas.AuthorizationAction.read
     )
     db.verify_authorization(auth_input)
 
@@ -115,19 +111,17 @@ def get_feature_vector_by_uri(uri, project=None, update=True):
 
     project, name, tag, uid = parse_versioned_object_uri(uri, default_project)
 
-    resource = (
-        mlrun.api.schemas.AuthorizationResourceTypes.feature_vector.to_resource_string(
-            project, "feature-vector"
-        )
+    resource = mlrun.common.schemas.AuthorizationResourceTypes.feature_vector.to_resource_string(
+        project, "feature-vector"
     )
 
     if update:
         auth_input = AuthorizationVerificationInput(
-            resource=resource, action=mlrun.api.schemas.AuthorizationAction.update
+            resource=resource, action=mlrun.common.schemas.AuthorizationAction.update
         )
     else:
         auth_input = AuthorizationVerificationInput(
-            resource=resource, action=mlrun.api.schemas.AuthorizationAction.read
+            resource=resource, action=mlrun.common.schemas.AuthorizationAction.read
         )
 
     db.verify_authorization(auth_input)
@@ -136,12 +130,12 @@ def get_feature_vector_by_uri(uri, project=None, update=True):
 
 
 def verify_feature_set_permissions(
-    feature_set, action: mlrun.api.schemas.AuthorizationAction
+    feature_set, action: mlrun.common.schemas.AuthorizationAction
 ):
     project, _, _, _ = parse_feature_set_uri(feature_set.uri)
 
     resource = (
-        mlrun.api.schemas.AuthorizationResourceTypes.feature_set.to_resource_string(
+        mlrun.common.schemas.AuthorizationResourceTypes.feature_set.to_resource_string(
             project, "feature-set"
         )
     )
@@ -157,21 +151,20 @@ def verify_feature_set_exists(feature_set):
 
     try:
         fset = db.get_feature_set(feature_set.metadata.name, project, tag)
-        if not fset.spec.features:
-            raise mlrun.errors.MLRunNotFoundError(f"feature set {uri} is empty")
     except mlrun.errors.MLRunNotFoundError:
         raise mlrun.errors.MLRunNotFoundError(f"feature set {uri} does not exist")
 
+    if not fset.spec.features:
+        raise mlrun.errors.MLRunNotFoundError(f"feature set {uri} is empty")
+
 
 def verify_feature_vector_permissions(
-    feature_vector, action: mlrun.api.schemas.AuthorizationAction
+    feature_vector, action: mlrun.common.schemas.AuthorizationAction
 ):
-    project = feature_vector._metadata.project or mlconf.default_project
+    project = feature_vector._metadata.project or config.default_project
 
-    resource = (
-        mlrun.api.schemas.AuthorizationResourceTypes.feature_vector.to_resource_string(
-            project, "feature-vector"
-        )
+    resource = mlrun.common.schemas.AuthorizationResourceTypes.feature_vector.to_resource_string(
+        project, "feature-vector"
     )
 
     db = mlrun.get_run_db()
@@ -185,17 +178,17 @@ class RunConfig:
     def __init__(
         self,
         function: typing.Union[str, FunctionReference, BaseRuntime] = None,
-        local: bool = None,
-        image: str = None,
-        kind: str = None,
-        handler: str = None,
-        parameters: dict = None,
-        watch: bool = None,
+        local: typing.Optional[bool] = None,
+        image: typing.Optional[str] = None,
+        kind: typing.Optional[str] = None,
+        handler: typing.Optional[str] = None,
+        parameters: typing.Optional[dict] = None,
+        watch: typing.Optional[bool] = None,
         owner=None,
         credentials: typing.Optional[mlrun.model.Credentials] = None,
-        code: str = None,
-        requirements: typing.Union[str, typing.List[str]] = None,
-        extra_spec: dict = None,
+        code: typing.Optional[str] = None,
+        requirements: typing.Optional[typing.Union[str, list[str]]] = None,
+        extra_spec: typing.Optional[dict] = None,
         auth_info=None,
     ):
         """class for holding function and run specs for jobs and serving functions
@@ -218,7 +211,7 @@ class RunConfig:
             config = RunConfig("mycode.py", image="mlrun/mlrun", requirements=["spacy"])
 
             # config for using function object
-            function = mlrun.import_function("hub://some_function")
+            function = mlrun.import_function("hub://some-function")
             config = RunConfig(function)
 
         :param function:    this can be function uri or function object or path to function code (.py/.ipynb)
@@ -308,7 +301,9 @@ class RunConfig:
                 self.function.requirements = self.requirements
             if self.extra_spec:
                 self.function.spec = self.extra_spec
-            function = self.function.to_function(default_kind, default_image)
+            function = self.function.to_function(
+                default_kind, self.image or default_image
+            )
         elif hasattr(self.function, "apply"):
             function = copy(self.function)
             if self.code:
@@ -319,7 +314,7 @@ class RunConfig:
                 self.function = enrich_function_from_dict(
                     self.function, self.extra_spec
                 )
-            function.spec.image = function.spec.image or default_image
+            function.spec.image = function.spec.image or self.image or default_image
         else:
             function = FunctionReference(
                 self.function,

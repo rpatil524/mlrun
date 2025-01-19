@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+from typing import Optional
 
 import storey
 
@@ -37,10 +39,10 @@ class CacheEntry:
 class Merge(storey.Flow):
     def __init__(
         self,
-        full_event: bool = None,
-        key_path: str = None,
-        max_behind: int = None,
-        expected_num_events: int = None,
+        full_event: Optional[bool] = None,
+        key_path: Optional[str] = None,
+        max_behind: Optional[int] = None,
+        expected_num_events: Optional[int] = None,
         **kwargs,
     ):
         """Merge multiple events based on event id or provided key path
@@ -72,7 +74,7 @@ class Merge(storey.Flow):
         self._queue_len = max_behind or 64  # default queue is 64 entries
         self._keys_queue = []
 
-    def post_init(self, mode="sync"):
+    def post_init(self, mode="sync", **kwargs):
         # auto detect number of uplinks or use user specified value
         self._uplinks = self.expected_num_events or (
             len(self._graph_step.after) if self._graph_step else 0

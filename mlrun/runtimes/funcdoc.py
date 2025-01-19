@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,15 +19,15 @@ import re
 from mlrun.model import FunctionEntrypoint
 
 
-def type_name(ann):
+def type_name(ann, empty_is_none=False):
     if ann is inspect.Signature.empty:
-        return ""
+        return None if empty_is_none else ""
     return getattr(ann, "__name__", str(ann))
 
 
 def inspect_default(value):
     if value is inspect.Signature.empty:
-        return ""
+        return None
     return repr(value)
 
 
@@ -41,40 +41,34 @@ def inspect_param(param: inspect.Parameter) -> dict:
 # We're using dict and not classes (here and in func_dict) since this goes
 # directly to YAML
 def param_dict(name="", type="", doc="", default=""):
-    return {
-        "default": default,
+    return_value = {
         "doc": doc,
         "name": name,
         "type": type,
     }
+    if default is not None:
+        return_value["default"] = default
+    return return_value
 
 
-def func_dict(name, doc, params, returns, lineno):
+def func_dict(
+    name,
+    doc,
+    params,
+    returns,
+    lineno,
+    has_varargs: bool = False,
+    has_kwargs: bool = False,
+):
     return {
         "name": name,
         "doc": doc,
         "params": params,
         "return": returns,
         "lineno": lineno,
+        "has_varargs": has_varargs,
+        "has_kwargs": has_kwargs,
     }
-
-
-def func_info(fn) -> dict:
-    sig = inspect.signature(fn)
-    doc = inspect.getdoc(fn) or ""
-
-    out = func_dict(
-        name=fn.__name__,
-        doc=doc,
-        params=[inspect_param(p) for p in sig.parameters.values()],
-        returns=param_dict(type=type_name(sig.return_annotation)),
-        lineno=func_lineno(fn),
-    )
-
-    if not fn.__doc__ or not fn.__doc__.strip():
-        return out
-
-    return merge_doc(out, doc)
 
 
 def func_lineno(fn):
@@ -163,8 +157,13 @@ def parse_rst(docstring: str):
 
 def ast_func_info(func: ast.FunctionDef):
     doc = ast.get_docstring(func) or ""
-    rtype = getattr(func.returns, "id", "")
+    rtype = None
+    if func.returns:
+        rtype = ast.unparse(func.returns)
     params = [ast_param_dict(p) for p in func.args.args]
+    # adds info about *args and **kwargs to the function doc
+    has_varargs = func.args.vararg is not None
+    has_kwargs = func.args.kwarg is not None
     defaults = func.args.defaults
     if defaults:
         for param, default in zip(params[-len(defaults) :], defaults):
@@ -174,8 +173,10 @@ def ast_func_info(func: ast.FunctionDef):
         name=func.name,
         doc=doc,
         params=params,
-        returns=param_dict(type=rtype),
+        returns=param_dict(type=rtype, default=None),
         lineno=func.lineno,
+        has_varargs=has_varargs,
+        has_kwargs=has_kwargs,
     )
 
     if not doc.strip():
@@ -189,20 +190,36 @@ def ast_param_dict(param: ast.arg) -> dict:
         "name": param.arg,
         "type": ann_type(param.annotation) if param.annotation else "",
         "doc": "",
-        "default": "",
     }
 
 
 def ann_type(ann):
     if hasattr(ann, "slice"):
-        name = ann.value.id
+        if isinstance(ann.value, ast.Attribute):
+            # value is an attribute, e.g. b of a.b - get the full path
+            name = get_attr_path(ann.value)
+        else:
+            name = ann.value.id
         inner = ", ".join(ann_type(e) for e in iter_elems(ann.slice))
         return f"{name}[{inner}]"
 
     if isinstance(ann, ast.Attribute):
+        if isinstance(ann.value, ast.Attribute):
+            # value is an attribute, e.g. b of a.b - get the full path
+            return get_attr_path(ann)
+
         return ann.attr
 
     return getattr(ann, "id", "")
+
+
+def get_attr_path(ann: ast.Attribute):
+    if isinstance(ann.value, ast.Attribute):
+        # value is an attribute, e.g. b of a.b - get the full path
+        return f"{get_attr_path(ann.value)}.{ann.attr}"
+
+    # value can be a subscript or name - get its annotation type and append the attribute
+    return f"{ann_type(ann.value)}.{ann.attr}"
 
 
 def iter_elems(ann):
@@ -218,11 +235,6 @@ def iter_elems(ann):
     if not hasattr(ann, "slice"):
         return [ann.value]
 
-    # From python 3.9, slice is an expr and we should evaluate it recursively. Left this for backward compatibility.
-    elif hasattr(ann.slice, "elts"):
-        return ann.slice.elts
-    elif hasattr(ann.slice, "value"):
-        return [ann.slice.value]
     return [ann]
 
 
@@ -235,7 +247,7 @@ class ASTVisitor(ast.NodeVisitor):
         self.exprs.append(node)
         super().generic_visit(node)
 
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node):  # noqa: N802
         self.funcs.append(node)
         self.generic_visit(node)
 
@@ -261,6 +273,8 @@ def as_func(handler):
         parameters=[clean(p) for p in handler["params"]],
         outputs=[ret] if ret else None,
         lineno=handler["lineno"],
+        has_varargs=handler["has_varargs"],
+        has_kwargs=handler["has_kwargs"],
     ).to_dict()
 
 

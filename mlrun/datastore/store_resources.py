@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,16 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
-
 import mlrun
+import mlrun.artifacts
 from mlrun.config import config
-from mlrun.utils.helpers import (
-    is_legacy_artifact,
-    parse_artifact_uri,
-    parse_versioned_object_uri,
-)
+from mlrun.utils.helpers import parse_artifact_uri
 
+from ..common.helpers import parse_versioned_object_uri
 from ..platforms.iguazio import parse_path
 from ..utils import DB_SCHEMA, StorePrefix
 from .targets import get_online_target
@@ -29,6 +25,8 @@ from .targets import get_online_target
 
 def is_store_uri(url):
     """detect if the uri starts with the store schema prefix"""
+    if not url:
+        return False
     return url.startswith(DB_SCHEMA + "://")
 
 
@@ -81,7 +79,7 @@ class ResourceCache:
             endpoint, uri = parse_path(uri)
             self._tabels[uri] = Table(
                 uri,
-                V3ioDriver(webapi=endpoint),
+                V3ioDriver(webapi=endpoint or mlrun.mlconf.v3io_api),
                 flush_interval_secs=mlrun.mlconf.feature_store.flush_interval,
             )
             return self._tabels[uri]
@@ -101,8 +99,8 @@ class ResourceCache:
         if is_store_uri(uri):
             resource = get_store_resource(uri)
             if resource.kind in [
-                mlrun.api.schemas.ObjectKind.feature_set.value,
-                mlrun.api.schemas.ObjectKind.feature_vector.value,
+                mlrun.common.schemas.ObjectKind.feature_set.value,
+                mlrun.common.schemas.ObjectKind.feature_vector.value,
             ]:
                 target = get_online_target(resource)
                 if not target:
@@ -148,7 +146,11 @@ def get_store_resource(
 
     db = db or mlrun.get_run_db(secrets=secrets)
     kind, uri = parse_store_uri(uri)
-    if kind == StorePrefix.FeatureSet:
+    if not kind:
+        raise mlrun.errors.MLRunInvalidArgumentError(
+            f"Cannot get store resource from invalid URI: {uri}"
+        )
+    elif kind == StorePrefix.FeatureSet:
         project, name, tag, uid = parse_versioned_object_uri(
             uri, project or config.default_project
         )
@@ -161,20 +163,20 @@ def get_store_resource(
         return db.get_feature_vector(name, project, tag, uid)
 
     elif StorePrefix.is_artifact(kind):
-        project, key, iteration, tag, uid = parse_artifact_uri(
+        project, key, iteration, tag, tree, uid = parse_artifact_uri(
             uri, project or config.default_project
         )
-
         resource = db.read_artifact(
-            key, project=project, tag=tag or uid, iter=iteration
+            key,
+            project=project,
+            tag=tag,
+            iter=iteration,
+            tree=tree,
+            uid=uid,
         )
         if resource.get("kind", "") == "link":
             # todo: support other link types (not just iter, move this to the db/api layer
-            link_iteration = (
-                resource.get("link_iteration", 0)
-                if is_legacy_artifact(resource)
-                else resource["spec"].get("link_iteration", 0)
-            )
+            link_iteration = resource["spec"].get("link_iteration", 0)
 
             resource = db.read_artifact(
                 key,
@@ -183,10 +185,7 @@ def get_store_resource(
                 project=project,
             )
         if resource:
-            # import here to avoid circular imports
-            from mlrun.artifacts import dict_to_artifact
-
-            return dict_to_artifact(resource)
+            return mlrun.artifacts.dict_to_artifact(resource)
 
     else:
         stores = mlrun.store_manager.set(secrets, db=db)

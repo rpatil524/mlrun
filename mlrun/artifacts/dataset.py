@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,22 +13,24 @@
 # limitations under the License.
 import os
 import pathlib
+import warnings
 from io import StringIO
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pandas as pd
-from deprecated import deprecated
 from pandas.io.json import build_table_schema
 
 import mlrun
+import mlrun.common.schemas
+import mlrun.datastore
 import mlrun.utils.helpers
+from mlrun.config import config as mlconf
 
-from ..datastore import is_store_uri, store_manager
-from .base import Artifact, ArtifactSpec, LegacyArtifact
+from .base import Artifact, ArtifactSpec, StorePrefix
 
 default_preview_rows_length = 20
-max_preview_columns = 100
+max_preview_columns = mlconf.artifacts.datasets.max_preview_columns
 max_csv = 10000
 ddf_sample_pct = 0.2
 max_ddf_size = 1
@@ -36,6 +38,10 @@ max_ddf_size = 1
 
 class TableArtifactSpec(ArtifactSpec):
     _dict_fields = ArtifactSpec._dict_fields + ["schema", "header"]
+    _exclude_fields_from_uid_hash = ArtifactSpec._exclude_fields_from_uid_hash + [
+        "schema",
+        "header",
+    ]
 
     def __init__(self):
         super().__init__()
@@ -58,7 +64,6 @@ class TableArtifact(Artifact):
         header=None,
         schema=None,
     ):
-
         if key:
             key_suffix = pathlib.Path(key).suffix
             if not format and key_suffix:
@@ -67,7 +72,7 @@ class TableArtifact(Artifact):
 
         if df is not None:
             self._is_df = True
-            self.spec.header = df.reset_index().columns.values.tolist()
+            self.spec.header = df.reset_index(drop=True).columns.values.tolist()
             self.spec.format = "csv"  # todo other formats
             # if visible and not key_suffix:
             #     key += '.csv'
@@ -93,12 +98,27 @@ class TableArtifact(Artifact):
         if not self._is_df:
             return self.spec.get_body()
         csv_buffer = StringIO()
-        self.spec.get_body().to_csv(csv_buffer, line_terminator="\n", encoding="utf-8")
+        self.spec.get_body().to_csv(
+            csv_buffer,
+            encoding="utf-8",
+            **mlrun.utils.line_terminator_kwargs(),
+        )
         return csv_buffer.getvalue()
 
 
 class DatasetArtifactSpec(ArtifactSpec):
     _dict_fields = ArtifactSpec._dict_fields + [
+        "schema",
+        "header",
+        "length",
+        "column_metadata",
+        "features",
+        "partition_keys",
+        "timestamp_key",
+        "label_column",
+    ]
+
+    _exclude_fields_from_uid_hash = ArtifactSpec._exclude_fields_from_uid_hash + [
         "schema",
         "header",
         "length",
@@ -122,30 +142,37 @@ class DatasetArtifactSpec(ArtifactSpec):
 
 
 class DatasetArtifact(Artifact):
-    kind = "dataset"
+    kind = mlrun.common.schemas.ArtifactCategories.dataset
     # List of all the supported saving formats of a DataFrame:
     SUPPORTED_FORMATS = ["csv", "parquet", "pq", "tsdb", "kv"]
+    _store_prefix = StorePrefix.Dataset
 
     def __init__(
         self,
-        key: str = None,
+        key: Optional[str] = None,
         df=None,
-        preview: int = None,
+        preview: Optional[int] = None,
         format: str = "",  # TODO: should be changed to 'fmt'.
-        stats: bool = None,
-        target_path: str = None,
-        extra_data: dict = None,
-        column_metadata: dict = None,
+        stats: Optional[bool] = None,
+        target_path: Optional[str] = None,
+        extra_data: Optional[dict] = None,
+        column_metadata: Optional[dict] = None,
         ignore_preview_limits: bool = False,
-        label_column: str = None,
+        label_column: Optional[str] = None,
         **kwargs,
     ):
+        if key or format or target_path:
+            warnings.warn(
+                "Artifact constructor parameters are deprecated and will be removed in 1.9.0. "
+                "Use the metadata and spec parameters instead.",
+                DeprecationWarning,
+            )
 
         format = (format or "").lower()
         super().__init__(key, None, format=format, target_path=target_path)
         if format and format not in self.SUPPORTED_FORMATS:
             raise ValueError(
-                f"unsupported format {format} use one of {'|'.join(self.SUPPORTED_FORMATS)}"
+                f"Unsupported format {format} use one of {'|'.join(self.SUPPORTED_FORMATS)}"
             )
 
         if format == "pq":
@@ -157,6 +184,10 @@ class DatasetArtifact(Artifact):
         self.spec.label_column = label_column
 
         if df is not None:
+            if label_column and label_column not in df.columns:
+                raise mlrun.errors.MLRunValueError(
+                    f"Provided dataframe doesn't include a column \"{label_column}\", so it can't be used as label"
+                )
             if hasattr(df, "dask"):
                 # If df is a Dask DataFrame, and it's small in-memory, convert to Pandas
                 if (df.memory_usage(deep=True).sum().compute() / 1e9) < max_ddf_size:
@@ -176,7 +207,7 @@ class DatasetArtifact(Artifact):
     def spec(self, spec):
         self._spec = self._verify_dict(spec, "spec", DatasetArtifactSpec)
 
-    def upload(self, artifact_path: str = None):
+    def upload(self, artifact_path: Optional[str] = None):
         """
         internal, upload to target store
         :param artifact_path: required only for when generating target_path from artifact hash
@@ -207,13 +238,23 @@ class DatasetArtifact(Artifact):
         if not suffix and not self.spec.target_path.startswith("memory://"):
             self.spec.target_path = self.spec.target_path + "." + format
 
-        self.spec.size, self.metadata.hash = upload_dataframe(
-            self._df,
-            self.spec.target_path,
-            format=format,
-            src_path=self.spec.src_path,
-            **self._kw,
-        )
+        if self._df is not None:
+            self.spec.size, self.metadata.hash = upload_dataframe(
+                self._df,
+                self.spec.target_path,
+                format=format,
+                src_path=self.spec.src_path,
+                **self._kw,
+            )
+        else:
+            body = self.get_body()
+            if body:
+                self._upload_body(
+                    body=body, target=self.target_path, artifact_path=artifact_path
+                )
+            else:
+                # don't fail if no df or body
+                self.spec.size, self.metadata.hash = None, None
 
     def resolve_dataframe_target_hash_path(self, dataframe, artifact_path: str):
         if not artifact_path:
@@ -262,11 +303,17 @@ class DatasetArtifact(Artifact):
 
         if artifact.spec.length > preview_rows_length and not ignore_preview_limits:
             preview_df = df.head(preview_rows_length)
+
         preview_df = preview_df.reset_index()
+        artifact.status.header_original_length = len(preview_df.columns)
         if len(preview_df.columns) > max_preview_columns and not ignore_preview_limits:
             preview_df = preview_df.iloc[:, :max_preview_columns]
         artifact.spec.header = preview_df.columns.values.tolist()
         artifact.status.preview = preview_df.values.tolist()
+        # Table schema parsing doesn't require a column named "index"
+        # to align its output with previously generated header and preview data
+        if "index" in preview_df.columns:
+            preview_df.drop("index", axis=1, inplace=True)
         artifact.spec.schema = build_table_schema(preview_df)
 
         # set artifact stats if stats is explicitly set to true, or if stats is None and the dataframe is small
@@ -320,187 +367,6 @@ class DatasetArtifact(Artifact):
         self.status.stats = stats
 
 
-# TODO: remove in 1.5.0
-@deprecated(
-    version="1.3.0",
-    reason="'LegacyTableArtifact' will be removed in 1.5.0, use 'TableArtifact' instead",
-    category=FutureWarning,
-)
-class LegacyTableArtifact(LegacyArtifact):
-    _dict_fields = LegacyArtifact._dict_fields + ["schema", "header"]
-    kind = "table"
-
-    def __init__(
-        self,
-        key=None,
-        body=None,
-        df=None,
-        viewer=None,
-        visible=False,
-        inline=False,
-        format=None,
-        header=None,
-        schema=None,
-    ):
-
-        if key:
-            key_suffix = pathlib.Path(key).suffix
-            if not format and key_suffix:
-                format = key_suffix[1:]
-        super().__init__(key, body, viewer=viewer, is_inline=inline, format=format)
-
-        if df is not None:
-            self._is_df = True
-            self.header = df.reset_index().columns.values.tolist()
-            self.format = "csv"  # todo other formats
-            # if visible and not key_suffix:
-            #     key += '.csv'
-            self._body = df
-        else:
-            self._is_df = False
-            self.header = header
-
-        self.schema = schema
-        if not viewer:
-            viewer = "table" if visible else None
-        self.viewer = viewer
-
-    def get_body(self):
-        if not self._is_df:
-            return self._body
-        csv_buffer = StringIO()
-        self._body.to_csv(csv_buffer, line_terminator="\n", encoding="utf-8")
-        return csv_buffer.getvalue()
-
-
-# TODO: remove in 1.5.0
-@deprecated(
-    version="1.3.0",
-    reason="'LegacyDatasetArtifact' will be removed in 1.5.0, use 'DatasetArtifact' instead",
-    category=FutureWarning,
-)
-class LegacyDatasetArtifact(LegacyArtifact):
-    # List of all the supported saving formats of a DataFrame:
-    SUPPORTED_FORMATS = ["csv", "parquet", "pq", "tsdb", "kv"]
-
-    _dict_fields = LegacyArtifact._dict_fields + [
-        "schema",
-        "header",
-        "length",
-        "preview",
-        "stats",
-        "extra_data",
-        "column_metadata",
-    ]
-    kind = "dataset"
-
-    def __init__(
-        self,
-        key: str = None,
-        df=None,
-        preview: int = None,
-        format: str = "",  # TODO: should be changed to 'fmt'.
-        stats: bool = None,
-        target_path: str = None,
-        extra_data: dict = None,
-        column_metadata: dict = None,
-        ignore_preview_limits: bool = False,
-        **kwargs,
-    ):
-
-        format = (format or "").lower()
-        super().__init__(key, None, format=format, target_path=target_path)
-        if format and format not in self.SUPPORTED_FORMATS:
-            raise ValueError(
-                f"unsupported format {format} use one of {'|'.join(self.SUPPORTED_FORMATS)}"
-            )
-
-        if format == "pq":
-            format = "parquet"
-        self.format = format
-        self.stats = None
-        self.extra_data = extra_data or {}
-        self.column_metadata = column_metadata or {}
-
-        if df is not None:
-            if hasattr(df, "dask"):
-                # If df is a Dask DataFrame, and it's small in-memory, convert to Pandas
-                if (df.memory_usage(deep=True).sum().compute() / 1e9) < max_ddf_size:
-                    df = df.compute()
-            self.update_preview_fields_from_df(
-                self, df, stats, preview, ignore_preview_limits
-            )
-
-        self._df = df
-        self._kw = kwargs
-
-    def upload(self):
-        suffix = pathlib.Path(self.target_path).suffix
-        format = self.format
-        if not format:
-            if suffix and suffix in [".csv", ".parquet", ".pq"]:
-                format = "csv" if suffix == ".csv" else "parquet"
-            else:
-                format = "parquet"
-        if not suffix and not self.target_path.startswith("memory://"):
-            self.target_path = self.target_path + "." + format
-
-        self.size, self.hash = upload_dataframe(
-            self._df,
-            self.target_path,
-            format=format,
-            src_path=self.src_path,
-            **self._kw,
-        )
-
-    @property
-    def df(self) -> pd.DataFrame:
-        """
-        Get the dataset in this artifact.
-
-        :return: The dataset as a DataFrame.
-        """
-        return self._df
-
-    @staticmethod
-    def is_format_supported(fmt: str) -> bool:
-        """
-        Check whether the given dataset format is supported by the DatasetArtifact.
-
-        :param fmt: The format string to check.
-
-        :return: True if the format is supported and False if not.
-        """
-        return fmt in DatasetArtifact.SUPPORTED_FORMATS
-
-    @staticmethod
-    def update_preview_fields_from_df(
-        artifact, df, stats=None, preview_rows_length=None, ignore_preview_limits=False
-    ):
-        preview_rows_length = preview_rows_length or default_preview_rows_length
-        if hasattr(df, "dask"):
-            artifact.length = df.shape[0].compute()
-            preview_df = df.sample(frac=ddf_sample_pct).compute()
-        else:
-            artifact.length = df.shape[0]
-            preview_df = df
-
-        if artifact.length > preview_rows_length and not ignore_preview_limits:
-            preview_df = df.head(preview_rows_length)
-        preview_df = preview_df.reset_index()
-        if len(preview_df.columns) > max_preview_columns and not ignore_preview_limits:
-            preview_df = preview_df.iloc[:, :max_preview_columns]
-        artifact.header = preview_df.columns.values.tolist()
-        artifact.preview = preview_df.values.tolist()
-        artifact.schema = build_table_schema(preview_df)
-        if (
-            stats
-            or (artifact.length < max_csv and len(df.columns) < max_preview_columns)
-            or ignore_preview_limits
-        ):
-            artifact.stats = get_df_stats(df)
-
-
 def get_df_stats(df):
     if hasattr(df, "dask"):
         df = df.sample(frac=ddf_sample_pct).compute()
@@ -530,13 +396,13 @@ def get_df_stats(df):
 def update_dataset_meta(
     artifact,
     from_df=None,
-    schema: dict = None,
-    header: list = None,
-    preview: list = None,
-    stats: dict = None,
-    extra_data: dict = None,
-    column_metadata: dict = None,
-    labels: dict = None,
+    schema: Optional[dict] = None,
+    header: Optional[list] = None,
+    preview: Optional[list] = None,
+    stats: Optional[dict] = None,
+    extra_data: Optional[dict] = None,
+    column_metadata: Optional[dict] = None,
+    labels: Optional[dict] = None,
     ignore_preview_limits: bool = False,
 ):
     """Update dataset object attributes/metadata
@@ -564,8 +430,8 @@ def update_dataset_meta(
 
     if isinstance(artifact, DatasetArtifact):
         artifact_spec = artifact
-    elif is_store_uri(artifact):
-        artifact_spec, _ = store_manager.get_store_artifact(artifact)
+    elif mlrun.datastore.is_store_uri(artifact):
+        artifact_spec, _ = mlrun.datastore.store_manager.get_store_artifact(artifact)
     else:
         raise ValueError("model path must be a model store object/URL/DataItem")
 
@@ -601,7 +467,7 @@ def update_dataset_meta(
     mlrun.get_run_db().store_artifact(
         artifact_spec.spec.db_key,
         artifact_spec.to_dict(),
-        artifact_spec.metadata.tree,
+        tree=artifact_spec.metadata.tree,
         iter=artifact_spec.metadata.iter,
         project=artifact_spec.metadata.project,
     )
@@ -609,9 +475,9 @@ def update_dataset_meta(
 
 def upload_dataframe(
     df, target_path, format, src_path=None, **kw
-) -> Tuple[Optional[int], Optional[str]]:
+) -> tuple[Optional[int], Optional[str]]:
     if src_path and os.path.isfile(src_path):
-        store_manager.object(url=target_path).upload(src_path)
+        mlrun.datastore.store_manager.object(url=target_path).upload(src_path)
         return (
             os.stat(src_path).st_size,
             mlrun.utils.helpers.calculate_local_file_hash(src_path),
@@ -621,7 +487,7 @@ def upload_dataframe(
         return None, None
 
     if target_path.startswith("memory://"):
-        store_manager.object(target_path).put(df)
+        mlrun.datastore.store_manager.object(target_path).put(df)
         return None, None
 
     if format in ["csv", "parquet"]:
@@ -629,4 +495,4 @@ def upload_dataframe(
         size = target_class(path=target_path).write_dataframe(df, **kw)
         return size, None
 
-    raise mlrun.errors.MLRunInvalidArgumentError(f"format {format} not implemented yet")
+    raise mlrun.errors.MLRunInvalidArgumentError(f"Format {format} not implemented yet")

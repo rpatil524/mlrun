@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from mlrun import new_task, run_local
+import mlrun
+from mlrun import new_task
 from tests.system.base import TestMLRunSystem
 
 
 @TestMLRunSystem.skip_test_if_env_not_configured
 class TestDB(TestMLRunSystem):
-
     project_name = "db-system-test-project"
 
     def test_db_commands(self):
@@ -37,9 +37,8 @@ class TestDB(TestMLRunSystem):
         )
 
         self._logger.debug("Running dummy task")
-        run_object = run_local(
-            task, command="training.py", workdir=str(self.assets_path)
-        )
+        function = mlrun.new_function(name="dummy", kind="job", command="training.py")
+        run_object = function.run(task, workdir=str(self.assets_path), local=True)
         self._logger.debug(
             "Finished running dummy task", run_object=run_object.to_dict()
         )
@@ -54,7 +53,7 @@ class TestDB(TestMLRunSystem):
             uid=self._run_uid,
             name="demo",
             project=self.project_name,
-            labels={"kind": "", "framework": "sklearn"},
+            labels={"kind": "local", "framework": "sklearn"},
         )
         self._verify_run_spec(
             runs[0]["spec"],
@@ -68,15 +67,17 @@ class TestDB(TestMLRunSystem):
 
         artifacts = self._run_db.list_artifacts(project=self.project_name, tag="*")
         assert len(artifacts) == artifacts_count_before_run + 4
-        for artifact_key in ["chart", "html_result", "model", "mydf"]:
-            artifact_exists = False
-            for artifact in artifacts:
-                if artifact["metadata"]["key"] == artifact_key:
-                    artifact_exists = True
-                    break
-            assert artifact_exists
+        db_artifact_keys = [artifact["metadata"]["key"] for artifact in artifacts]
+        expected_artifact_keys = sorted(
+            [
+                "plotly",
+                "html_result",
+                "model",
+                "mydf",
+            ]
+        )
+        assert sorted(db_artifact_keys) == expected_artifact_keys
 
         # Verify that ArtifactList methods process result properly
         result_keys = artifacts.to_df().to_dict(orient="list")["key"]
-        for artifact_key in ["chart", "html_result", "model", "mydf"]:
-            assert artifact_key in result_keys
+        assert sorted(result_keys) == expected_artifact_keys

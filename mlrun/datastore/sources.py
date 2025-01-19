@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,27 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import operator
 import os
 import warnings
 from base64 import b64encode
 from copy import copy
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 import pandas as pd
+import semver
 import v3io
 import v3io.dataplane
 from nuclio import KafkaTrigger
 from nuclio.config import split_path
 
 import mlrun
+from mlrun.config import config
+from mlrun.datastore.snowflake_utils import get_snowflake_spark_options
+from mlrun.datastore.utils import transform_list_filters_to_tuple
 from mlrun.secrets import SecretsStore
+from mlrun.utils import logger
 
-from ..config import config
 from ..model import DataSource
 from ..platforms.iguazio import parse_path
-from ..utils import get_class
-from .utils import store_path_to_spark
+from ..utils import get_class, is_explicit_ack_supported
+from .datastore_profile import datastore_profile_read
+from .spark_utils import spark_session_update_hadoop_options
+from .utils import (
+    _generate_sql_query_with_time_filter,
+    filter_df_start_end_time,
+    select_columns_from_df,
+)
+
+
+def load_spark_dataframe_with_options(session, spark_options, format=None):
+    non_hadoop_spark_options = spark_session_update_hadoop_options(
+        session, spark_options
+    )
+    if format:
+        df = session.read.format(format).load(**non_hadoop_spark_options)
+    else:
+        df = session.read.load(**non_hadoop_spark_options)
+    return df
 
 
 def get_source_from_dict(source):
@@ -55,44 +77,79 @@ class BaseSourceDriver(DataSource):
     support_spark = False
     support_storey = False
 
-    def _get_store(self):
-        store, _ = mlrun.store_manager.get_or_create_store(self.path)
-        return store
-
     def to_step(self, key_field=None, time_field=None, context=None):
         import storey
 
-        return storey.SyncEmitSource(context=context)
+        if not self.support_storey:
+            raise mlrun.errors.MLRunRuntimeError(
+                f"{type(self).__name__} does not support storey engine"
+            )
+
+        explicit_ack = (
+            is_explicit_ack_supported(context)
+            and mlrun.mlconf.is_explicit_ack_enabled()
+        )
+        return storey.SyncEmitSource(
+            context=context,
+            explicit_ack=explicit_ack,
+        )
 
     def get_table_object(self):
         """get storey Table object"""
         return None
 
-    def to_dataframe(self):
-        return mlrun.store_manager.object(url=self.path).as_df()
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
+        """return the source data as dataframe"""
+        mlrun.utils.helpers.additional_filters_warning(
+            additional_filters, self.__class__
+        )
+        return mlrun.store_manager.object(url=self.path).as_df(
+            columns=columns,
+            df_module=df_module,
+            start_time=start_time or self.start_time,
+            end_time=end_time or self.end_time,
+            time_column=time_field or self.time_field,
+        )
 
-    def filter_df_start_end_time(self, df, time_field):
-        # give priority to source time_field over the feature set's timestamp_key
-        if self.time_field:
-            time_field = self.time_field
-
-        if self.start_time or self.end_time:
-            self.start_time = (
-                datetime.min if self.start_time is None else self.start_time
-            )
-            self.end_time = datetime.max if self.end_time is None else self.end_time
-            df = df.filter(
-                (df[time_field] > self.start_time) & (df[time_field] <= self.end_time)
-            )
-        return df
-
-    def to_spark_df(self, session, named_view=False, time_field=None):
+    def to_spark_df(self, session, named_view=False, time_field=None, columns=None):
         if self.support_spark:
-            df = session.read.load(**self.get_spark_options())
+            spark_options = self.get_spark_options()
+            spark_format = spark_options.pop("format", None)
+            df = load_spark_dataframe_with_options(
+                session, spark_options, format=spark_format
+            )
             if named_view:
                 df.createOrReplaceTempView(self.name)
+            return self._filter_spark_df(df, time_field, columns)
+        raise NotImplementedError(
+            f"Conversion of a source of type '{type(self).__name__}' "
+            "to a Spark dataframe is not possible, as this operation is not supported"
+        )
+
+    def _filter_spark_df(self, df, time_field=None, columns=None):
+        if not (columns or time_field):
             return df
-        raise NotImplementedError()
+
+        from pyspark.sql.functions import col
+
+        if time_field:
+            if self.start_time:
+                df = df.filter(col(time_field) > self.start_time)
+            if self.end_time:
+                df = df.filter(col(time_field) <= self.end_time)
+
+        if columns:
+            df = df.select([col(name) for name in columns])
+        return df
 
     def get_spark_options(self):
         # options used in spark.read.load(**options)
@@ -110,7 +167,6 @@ class CSVSource(BaseSourceDriver):
     :parameter path: path to CSV file
     :parameter key_field: the CSV field to be used as the key for events. May be an int (field index) or string
         (field name) if with_header is True. Defaults to None (no key). Can be a list of keys.
-    :parameter time_field: DEPRECATED. Use parse_dates to parse timestamps.
     :parameter schedule: string to configure scheduling of the ingestion job.
     :parameter attributes: additional parameters to pass to storey. For example:
         attributes={"timestamp_format": '%Y%m%d%H'}
@@ -125,32 +181,16 @@ class CSVSource(BaseSourceDriver):
     def __init__(
         self,
         name: str = "",
-        path: str = None,
-        attributes: Dict[str, str] = None,
-        key_field: str = None,
-        time_field: str = None,
-        schedule: str = None,
-        parse_dates: Union[None, int, str, List[int], List[str]] = None,
+        path: Optional[str] = None,
+        attributes: Optional[dict[str, object]] = None,
+        key_field: Optional[str] = None,
+        schedule: Optional[str] = None,
+        parse_dates: Union[None, int, str, list[int], list[str]] = None,
         **kwargs,
     ):
-        super().__init__(
-            name, path, attributes, key_field, time_field, schedule, **kwargs
-        )
-        if time_field is not None:
-            warnings.warn(
-                "CSVSource's time_field parameter is deprecated in 1.3.0 and will be removed in 1.5.0. "
-                "Use parse_dates instead.",
-                # TODO: remove in 1.5.0
-                FutureWarning,
-            )
-            if isinstance(parse_dates, (int, str)):
-                parse_dates = [parse_dates]
-
-            if parse_dates is None:
-                parse_dates = [time_field]
-            elif time_field not in parse_dates:
-                parse_dates = copy(parse_dates)
-                parse_dates.append(time_field)
+        super().__init__(name, path, attributes, key_field, schedule=schedule, **kwargs)
+        if parse_dates and not isinstance(parse_dates, list):
+            parse_dates = [parse_dates]
         self._parse_dates = parse_dates
 
     def to_step(self, key_field=None, time_field=None, context=None):
@@ -164,28 +204,35 @@ class CSVSource(BaseSourceDriver):
         if time_field and time_field not in parse_dates:
             parse_dates.append(time_field)
 
+        data_item = mlrun.store_manager.object(self.path)
+        store, path, url = mlrun.store_manager.get_or_create_store(self.path)
+
         return storey.CSVSource(
-            paths=self.path,
-            header=True,
+            paths=url,  # unlike self.path, it already has store:// replaced
             build_dict=True,
             key_field=self.key_field or key_field,
-            storage_options=self._get_store().get_storage_options(),
+            storage_options=data_item.store.get_storage_options(),
             parse_dates=parse_dates,
             **attributes,
         )
 
     def get_spark_options(self):
-        return {
-            "path": store_path_to_spark(self.path),
-            "format": "csv",
-            "header": "true",
-            "inferSchema": "true",
-        }
+        store, path, _ = mlrun.store_manager.get_or_create_store(self.path)
+        spark_options = store.get_spark_options()
+        spark_options.update(
+            {
+                "path": store.spark_url + path,
+                "format": "csv",
+                "header": "true",
+                "inferSchema": "true",
+            }
+        )
+        return spark_options
 
-    def to_spark_df(self, session, named_view=False, time_field=None):
+    def to_spark_df(self, session, named_view=False, time_field=None, columns=None):
         import pyspark.sql.functions as funcs
 
-        df = session.read.load(**self.get_spark_options())
+        df = load_spark_dataframe_with_options(session, self.get_spark_options())
 
         parse_dates = self._parse_dates or []
         if time_field and time_field not in parse_dates:
@@ -196,15 +243,32 @@ class CSVSource(BaseSourceDriver):
                 df = df.withColumn(col_name, funcs.col(col_name).cast("timestamp"))
         if named_view:
             df.createOrReplaceTempView(self.name)
-        return df
+        return self._filter_spark_df(df, time_field, columns)
 
-    def to_dataframe(self):
-        kwargs = self.attributes.get("reader_args", {})
-        chunksize = self.attributes.get("chunksize")
-        if chunksize:
-            kwargs["chunksize"] = chunksize
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
+        mlrun.utils.helpers.additional_filters_warning(
+            additional_filters, self.__class__
+        )
+        reader_args = self.attributes.get("reader_args", {})
         return mlrun.store_manager.object(url=self.path).as_df(
-            parse_dates=self._parse_dates, **kwargs
+            columns=columns,
+            df_module=df_module,
+            format="csv",
+            start_time=start_time or self.start_time,
+            end_time=end_time or self.end_time,
+            time_column=time_field or self.time_field,
+            parse_dates=self._parse_dates,
+            chunksize=self.attributes.get("chunksize"),
+            **reader_args,
         )
 
     def is_iterator(self):
@@ -229,6 +293,12 @@ class ParquetSource(BaseSourceDriver):
     :parameter start_time: filters out data before this time
     :parameter end_time: filters out data after this time
     :parameter attributes: additional parameters to pass to storey.
+    :param additional_filters: List of additional_filter conditions as tuples.
+                               Each tuple should be in the format (column_name, operator, value).
+                               Supported operators: "=", ">=", "<=", ">", "<".
+                               Example: [("Product", "=", "Computer")]
+                               For all supported filters, please see:
+                               https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetDataset.html
     """
 
     kind = "parquet"
@@ -238,14 +308,19 @@ class ParquetSource(BaseSourceDriver):
     def __init__(
         self,
         name: str = "",
-        path: str = None,
-        attributes: Dict[str, str] = None,
-        key_field: str = None,
-        time_field: str = None,
-        schedule: str = None,
+        path: Optional[str] = None,
+        attributes: Optional[dict[str, object]] = None,
+        key_field: Optional[str] = None,
+        time_field: Optional[str] = None,
+        schedule: Optional[str] = None,
         start_time: Optional[Union[datetime, str]] = None,
         end_time: Optional[Union[datetime, str]] = None,
+        additional_filters: Optional[list[Union[tuple, list]]] = None,
     ):
+        if additional_filters:
+            attributes = copy(attributes) or {}
+            additional_filters = transform_list_filters_to_tuple(additional_filters)
+            attributes["additional_filters"] = additional_filters
 
         super().__init__(
             name,
@@ -274,6 +349,10 @@ class ParquetSource(BaseSourceDriver):
     def end_time(self, end_time):
         self._end_time = self._convert_to_datetime(end_time)
 
+    @property
+    def additional_filters(self):
+        return self.attributes.get("additional_filters")
+
     @staticmethod
     def _convert_to_datetime(time):
         if time and isinstance(time, str):
@@ -290,49 +369,177 @@ class ParquetSource(BaseSourceDriver):
         start_time=None,
         end_time=None,
         context=None,
+        additional_filters=None,
     ):
         import storey
 
-        attributes = self.attributes or {}
+        attributes = copy(self.attributes)
+        attributes.pop("additional_filters", None)
         if context:
             attributes["context"] = context
+        additional_filters = transform_list_filters_to_tuple(additional_filters)
+        data_item = mlrun.store_manager.object(self.path)
+        store, path, url = mlrun.store_manager.get_or_create_store(self.path)
         return storey.ParquetSource(
-            paths=self.path,
+            paths=url,  # unlike self.path, it already has store:// replaced
             key_field=self.key_field or key_field,
-            storage_options=self._get_store().get_storage_options(),
+            storage_options=data_item.store.get_storage_options(),
             end_filter=self.end_time,
             start_filter=self.start_time,
             filter_column=self.time_field or time_field,
+            additional_filters=self.additional_filters or additional_filters,
             **attributes,
         )
 
+    @classmethod
+    def from_dict(
+        cls, struct=None, fields=None, deprecated_fields: Optional[dict] = None
+    ):
+        new_obj = super().from_dict(
+            struct=struct, fields=fields, deprecated_fields=deprecated_fields
+        )
+        new_obj.attributes["additional_filters"] = transform_list_filters_to_tuple(
+            new_obj.additional_filters
+        )
+        return new_obj
+
     def get_spark_options(self):
-        return {
-            "path": store_path_to_spark(self.path),
-            "format": "parquet",
+        store, path, _ = mlrun.store_manager.get_or_create_store(self.path)
+        spark_options = store.get_spark_options()
+        spark_options.update(
+            {
+                "path": store.spark_url + path,
+                "format": "parquet",
+            }
+        )
+        return spark_options
+
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
+        reader_args = self.attributes.get("reader_args", {})
+        additional_filters = transform_list_filters_to_tuple(additional_filters)
+        return mlrun.store_manager.object(url=self.path).as_df(
+            columns=columns,
+            df_module=df_module,
+            start_time=start_time or self.start_time,
+            end_time=end_time or self.end_time,
+            time_column=time_field or self.time_field,
+            format="parquet",
+            additional_filters=additional_filters or self.additional_filters,
+            **reader_args,
+        )
+
+    def _build_spark_additional_filters(self, column_types: dict):
+        if not self.additional_filters:
+            return None
+        from pyspark.sql.functions import col, isnan, lit
+
+        operators = {
+            "==": operator.eq,
+            "=": operator.eq,
+            ">": operator.gt,
+            "<": operator.lt,
+            ">=": operator.ge,
+            "<=": operator.le,
+            "!=": operator.ne,
         }
 
-    def to_dataframe(self):
-        kwargs = self.attributes.get("reader_args", {})
-        return mlrun.store_manager.object(url=self.path).as_df(
-            format="parquet", **kwargs
+        spark_filter = None
+        new_filter = lit(True)
+        for filter_tuple in self.additional_filters:
+            if not filter_tuple:
+                continue
+            col_name, op, value = filter_tuple
+            if op.lower() in ("in", "not in") and isinstance(value, (list, tuple, set)):
+                none_exists = False
+                value = list(value)
+                for sub_value in value:
+                    if sub_value is None:
+                        value.remove(sub_value)
+                        none_exists = True
+                if none_exists:
+                    filter_nan = column_types[col_name] not in ("timestamp", "date")
+                    if value:
+                        if op.lower() == "in":
+                            new_filter = (
+                                col(col_name).isin(value) | col(col_name).isNull()
+                            )
+                            if filter_nan:
+                                new_filter = new_filter | isnan(col(col_name))
+
+                        else:
+                            new_filter = (
+                                ~col(col_name).isin(value) & ~col(col_name).isNull()
+                            )
+                            if filter_nan:
+                                new_filter = new_filter & ~isnan(col(col_name))
+                    else:
+                        if op.lower() == "in":
+                            new_filter = col(col_name).isNull()
+                            if filter_nan:
+                                new_filter = new_filter | isnan(col(col_name))
+                        else:
+                            new_filter = ~col(col_name).isNull()
+                            if filter_nan:
+                                new_filter = new_filter & ~isnan(col(col_name))
+                else:
+                    if op.lower() == "in":
+                        new_filter = col(col_name).isin(value)
+                    elif op.lower() == "not in":
+                        new_filter = ~col(col_name).isin(value)
+            elif op in operators:
+                new_filter = operators[op](col(col_name), value)
+            else:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"unsupported filter operator: {op}"
+                )
+            if spark_filter is not None:
+                spark_filter = spark_filter & new_filter
+            else:
+                spark_filter = new_filter
+        return spark_filter
+
+    def _filter_spark_df(self, df, time_field=None, columns=None):
+        spark_additional_filters = self._build_spark_additional_filters(
+            column_types=dict(df.dtypes)
         )
+        if spark_additional_filters is not None:
+            df = df.filter(spark_additional_filters)
+        return super()._filter_spark_df(df=df, time_field=time_field, columns=columns)
 
 
 class BigQuerySource(BaseSourceDriver):
     """
     Reads Google BigQuery query results as input source for a flow.
 
+    For authentication, set the GCP_CREDENTIALS project secret to the credentials json string.
+
     example::
+
+         # set the credentials
+         project.set_secrets({"GCP_CREDENTIALS": gcp_credentials_json})
 
          # use sql query
          query_string = "SELECT * FROM `the-psf.pypi.downloads20210328` LIMIT 5000"
-         source = BigQuerySource("bq1", query=query_string,
-                                 gcp_project="my_project",
-                                 materialization_dataset="dataviews")
+         source = BigQuerySource(
+             "bq1",
+             query=query_string,
+             gcp_project="my_project",
+             materialization_dataset="dataviews",
+         )
 
          # read a table
-         source = BigQuerySource("bq2", table="the-psf.pypi.downloads20210328", gcp_project="my_project")
+         source = BigQuerySource(
+             "bq2", table="the-psf.pypi.downloads20210328", gcp_project="my_project"
+         )
 
 
     :parameter name: source name
@@ -359,22 +566,32 @@ class BigQuerySource(BaseSourceDriver):
     def __init__(
         self,
         name: str = "",
-        table: str = None,
-        max_results_for_table: int = None,
-        query: str = None,
-        materialization_dataset: str = None,
-        chunksize: int = None,
-        key_field: str = None,
-        time_field: str = None,
-        schedule: str = None,
+        table: Optional[str] = None,
+        max_results_for_table: Optional[int] = None,
+        query: Optional[str] = None,
+        materialization_dataset: Optional[str] = None,
+        chunksize: Optional[int] = None,
+        key_field: Optional[str] = None,
+        time_field: Optional[str] = None,
+        schedule: Optional[str] = None,
         start_time=None,
         end_time=None,
-        gcp_project: str = None,
-        spark_options: dict = None,
+        gcp_project: Optional[str] = None,
+        spark_options: Optional[dict] = None,
+        **kwargs,
     ):
         if query and table:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "cannot specify both table and query args"
+            )
+        # Otherwise, the client library does not fully respect the limit
+        if (
+            max_results_for_table
+            and chunksize
+            and max_results_for_table % chunksize != 0
+        ):
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "max_results_for_table must be a multiple of chunksize"
             )
         attrs = {
             "query": query,
@@ -394,8 +611,8 @@ class BigQuerySource(BaseSourceDriver):
             schedule=schedule,
             start_time=start_time,
             end_time=end_time,
+            **kwargs,
         )
-        self._rows_iterator = None
 
     def _get_credentials_string(self):
         gcp_project = self.attributes.get("gcp_project", None)
@@ -417,9 +634,22 @@ class BigQuerySource(BaseSourceDriver):
             return credentials, gcp_project or gcp_cred_dict["project_id"]
         return None, gcp_project
 
-    def to_dataframe(self):
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
         from google.cloud import bigquery
         from google.cloud.bigquery_storage_v1 import BigQueryReadClient
+
+        mlrun.utils.helpers.additional_filters_warning(
+            additional_filters, self.__class__
+        )
 
         def schema_to_dtypes(schema):
             from mlrun.data_types.data_types import gbq_to_pandas_dtype
@@ -438,39 +668,42 @@ class BigQuerySource(BaseSourceDriver):
         if query:
             query_job = bqclient.query(query)
 
-            self._rows_iterator = query_job.result(page_size=chunksize)
-            dtypes = schema_to_dtypes(self._rows_iterator.schema)
-            if chunksize:
-                # passing bqstorage_client greatly improves performance
-                return self._rows_iterator.to_dataframe_iterable(
-                    bqstorage_client=BigQueryReadClient(), dtypes=dtypes
-                )
-            else:
-                return self._rows_iterator.to_dataframe(dtypes=dtypes)
+            rows_iterator = query_job.result(page_size=chunksize)
         elif table:
             table = self.attributes.get("table")
             max_results = self.attributes.get("max_results")
 
-            rows = bqclient.list_rows(
+            rows_iterator = bqclient.list_rows(
                 table, page_size=chunksize, max_results=max_results
             )
-            dtypes = schema_to_dtypes(rows.schema)
-            if chunksize:
-                # passing bqstorage_client greatly improves performance
-                return rows.to_dataframe_iterable(
-                    bqstorage_client=BigQueryReadClient(), dtypes=dtypes
-                )
-            else:
-                return rows.to_dataframe(dtypes=dtypes)
         else:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "table or query args must be specified"
             )
 
+        dtypes = schema_to_dtypes(rows_iterator.schema)
+        if chunksize:
+            # passing bqstorage_client greatly improves performance
+            df = rows_iterator.to_dataframe_iterable(
+                bqstorage_client=BigQueryReadClient(), dtypes=dtypes
+            )
+        else:
+            df = rows_iterator.to_dataframe(dtypes=dtypes)
+
+        return select_columns_from_df(
+            filter_df_start_end_time(
+                df,
+                time_column=time_field or self.time_field,
+                start_time=start_time or self.start_time,
+                end_time=end_time or self.end_time,
+            ),
+            columns=columns,
+        )
+
     def is_iterator(self):
         return bool(self.attributes.get("chunksize"))
 
-    def to_spark_df(self, session, named_view=False, time_field=None):
+    def to_spark_df(self, session, named_view=False, time_field=None, columns=None):
         options = copy(self.attributes.get("spark_options", {}))
         credentials, gcp_project = self._get_credentials_string()
         if credentials:
@@ -497,10 +730,10 @@ class BigQuerySource(BaseSourceDriver):
         elif table:
             options["path"] = table
 
-        df = session.read.format("bigquery").load(**options)
+        df = load_spark_dataframe_with_options(session, options, "bigquery")
         if named_view:
             df.createOrReplaceTempView(self.name)
-        return df
+        return self._filter_spark_df(df, time_field, columns)
 
 
 class SnowflakeSource(BaseSourceDriver):
@@ -518,7 +751,7 @@ class SnowflakeSource(BaseSourceDriver):
             url="...",
             user="...",
             database="...",
-            schema="...",
+            db_schema="...",
             warehouse="...",
         )
 
@@ -533,7 +766,8 @@ class SnowflakeSource(BaseSourceDriver):
     :parameter url: URL of the snowflake cluster
     :parameter user: snowflake user
     :parameter database: snowflake database
-    :parameter schema: snowflake schema
+    :parameter schema: snowflake schema - deprecated, use db_schema
+    :parameter db_schema: snowflake schema
     :parameter warehouse: snowflake warehouse
     """
 
@@ -544,63 +778,71 @@ class SnowflakeSource(BaseSourceDriver):
     def __init__(
         self,
         name: str = "",
-        key_field: str = None,
-        time_field: str = None,
-        schedule: str = None,
+        key_field: Optional[str] = None,
+        attributes: Optional[dict[str, object]] = None,
+        time_field: Optional[str] = None,
+        schedule: Optional[str] = None,
         start_time=None,
         end_time=None,
-        query: str = None,
-        url: str = None,
-        user: str = None,
-        database: str = None,
-        schema: str = None,
-        warehouse: str = None,
+        query: Optional[str] = None,
+        url: Optional[str] = None,
+        user: Optional[str] = None,
+        database: Optional[str] = None,
+        schema: Optional[str] = None,
+        db_schema: Optional[str] = None,
+        warehouse: Optional[str] = None,
+        **kwargs,
     ):
-        attrs = {
-            "query": query,
-            "url": url,
-            "user": user,
-            "database": database,
-            "schema": schema,
-            "warehouse": warehouse,
-        }
+        # TODO: Remove in 1.9.0
+        if schema:
+            warnings.warn(
+                "schema is deprecated in 1.7.0, and will be removed in 1.9.0, please use db_schema"
+            )
+        db_schema = db_schema or schema  # TODO: Remove in 1.9.0
+
+        attributes = attributes or {}
+        if url:
+            attributes["url"] = url
+        if user:
+            attributes["user"] = user
+        if database:
+            attributes["database"] = database
+        if db_schema:
+            attributes["db_schema"] = db_schema
+        if warehouse:
+            attributes["warehouse"] = warehouse
+        if query:
+            attributes["query"] = query
 
         super().__init__(
             name,
-            attributes=attrs,
+            attributes=attributes,
             key_field=key_field,
             time_field=time_field,
             schedule=schedule,
             start_time=start_time,
             end_time=end_time,
+            **kwargs,
         )
-
-    def _get_password(self):
-        key = "SNOWFLAKE_PASSWORD"
-        snowflake_password = os.getenv(key) or os.getenv(
-            SecretsStore.k8s_env_variable_name_for_secret(key)
-        )
-
-        if not snowflake_password:
-            raise mlrun.errors.MLRunInvalidArgumentError(
-                "No password provided. Set password using the SNOWFLAKE_PASSWORD "
-                "project secret or environment variable."
-            )
-
-        return snowflake_password
 
     def get_spark_options(self):
-        return {
-            "format": "net.snowflake.spark.snowflake",
-            "query": self.attributes.get("query"),
-            "sfURL": self.attributes.get("url"),
-            "sfUser": self.attributes.get("user"),
-            "sfPassword": self._get_password(),
-            "sfDatabase": self.attributes.get("database"),
-            "sfSchema": self.attributes.get("schema"),
-            "sfWarehouse": self.attributes.get("warehouse"),
-            "application": "iguazio_platform",
-        }
+        spark_options = get_snowflake_spark_options(self.attributes)
+        spark_options["query"] = self.attributes.get("query")
+        return spark_options
+
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
+        raise mlrun.errors.MLRunRuntimeError(
+            f"{type(self).__name__} supports only spark engine"
+        )
 
 
 class CustomSource(BaseSourceDriver):
@@ -610,9 +852,9 @@ class CustomSource(BaseSourceDriver):
 
     def __init__(
         self,
-        class_name: str = None,
+        class_name: Optional[str] = None,
         name: str = "",
-        schedule: str = None,
+        schedule: Optional[str] = None,
         **attributes,
     ):
         attributes = attributes or {}
@@ -631,22 +873,12 @@ class DataFrameSource:
     Reads data frame as input source for a flow.
 
     :parameter key_field: the column to be used as the key for events. Can be a list of keys. Defaults to None
-    :parameter time_field: DEPRECATED.
     :parameter context: MLRun context. Defaults to None
     """
 
     support_storey = True
 
-    def __init__(
-        self, df, key_field=None, time_field=None, context=None, iterator=False
-    ):
-        if time_field:
-            warnings.warn(
-                "DataFrameSource's time_field parameter has no effect. "
-                "It is deprecated in 1.3.0 and will be removed in 1.5.0",
-                FutureWarning,
-            )
-
+    def __init__(self, df, key_field=None, context=None, iterator=False):
         self._df = df
         if isinstance(key_field, str):
             self.key_field = [key_field]
@@ -664,7 +896,19 @@ class DataFrameSource:
             context=self.context or context,
         )
 
-    def to_dataframe(self):
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
+        mlrun.utils.helpers.additional_filters_warning(
+            additional_filters, self.__class__
+        )
         return self._df
 
     def is_iterator(self):
@@ -688,12 +932,12 @@ class OnlineSource(BaseSourceDriver):
 
     def __init__(
         self,
-        name: str = None,
-        path: str = None,
-        attributes: Dict[str, str] = None,
-        key_field: str = None,
-        time_field: str = None,
-        workers: int = None,
+        name: Optional[str] = None,
+        path: Optional[str] = None,
+        attributes: Optional[dict[str, object]] = None,
+        key_field: Optional[str] = None,
+        time_field: Optional[str] = None,
+        workers: Optional[int] = None,
     ):
         super().__init__(name, path, attributes, key_field, time_field)
         self.online = True
@@ -702,17 +946,16 @@ class OnlineSource(BaseSourceDriver):
     def to_step(self, key_field=None, time_field=None, context=None):
         import storey
 
-        source_class = (
-            storey.AsyncEmitSource
-            if config.datastore.async_source_mode == "enabled"
-            else storey.SyncEmitSource
-        )
         source_args = self.attributes.get("source_args", {})
-
-        src_class = source_class(
+        explicit_ack = (
+            is_explicit_ack_supported(context)
+            and mlrun.mlconf.is_explicit_ack_enabled()
+        )
+        src_class = storey.AsyncEmitSource(
             context=context,
-            key_field=self.key_field,
+            key_field=self.key_field or key_field,
             full_event=True,
+            explicit_ack=explicit_ack,
             **source_args,
         )
 
@@ -735,8 +978,6 @@ class HttpSource(OnlineSource):
 
 
 class StreamSource(OnlineSource):
-    """Sets stream source for the flow. If stream doesn't exist it will create it"""
-
     kind = "v3ioStream"
 
     def __init__(
@@ -746,11 +987,11 @@ class StreamSource(OnlineSource):
         seek_to="earliest",
         shards=1,
         retention_in_hours=24,
-        extra_attributes: dict = None,
+        extra_attributes: Optional[dict] = None,
         **kwargs,
     ):
         """
-        Sets stream source for the flow. If stream doesn't exist it will create it
+        Sets the stream source for the flow. If the stream doesn't exist it will create it.
 
         :param name: stream name. Default "stream"
         :param group: consumer group. Default "serving"
@@ -769,31 +1010,47 @@ class StreamSource(OnlineSource):
         super().__init__(name, attributes=attrs, **kwargs)
 
     def add_nuclio_trigger(self, function):
-        endpoint, stream_path = parse_path(self.path)
-        v3io_client = v3io.dataplane.Client(endpoint=endpoint)
+        store, _, url = mlrun.store_manager.get_or_create_store(self.path)
+        if store.kind != "v3io":
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "Only profiles that reference the v3io datastore can be used with StreamSource"
+            )
+        storage_options = store.get_storage_options()
+        access_key = storage_options.get("v3io_access_key")
+        endpoint, stream_path = parse_path(url)
+        v3io_client = v3io.dataplane.Client(endpoint=endpoint, access_key=access_key)
         container, stream_path = split_path(stream_path)
-        res = v3io_client.create_stream(
+        res = v3io_client.stream.create(
             container=container,
-            path=stream_path,
+            stream_path=stream_path,
             shard_count=self.attributes["shards"],
             retention_period_hours=self.attributes["retention_in_hours"],
             raise_for_status=v3io.dataplane.RaiseForStatus.never,
         )
         res.raise_for_status([409, 204])
+
+        kwargs = {}
+        engine = "async"
+        if hasattr(function.spec, "graph") and function.spec.graph.engine:
+            engine = function.spec.graph.engine
+
+        if mlrun.mlconf.is_explicit_ack_enabled() and engine == "async":
+            kwargs["explicit_ack_mode"] = "explicitOnly"
+            kwargs["worker_allocation_mode"] = "static"
+
         function.add_v3io_stream_trigger(
-            self.path,
+            url,
             self.name,
             self.attributes["group"],
             self.attributes["seek_to"],
             self.attributes["shards"],
             extra_attributes=self.attributes.get("extra_attributes", {}),
+            **kwargs,
         )
         return function
 
 
 class KafkaSource(OnlineSource):
-    """Sets kafka source for the flow"""
-
     kind = "kafka"
 
     def __init__(
@@ -832,34 +1089,140 @@ class KafkaSource(OnlineSource):
             attributes["partitions"] = partitions
         sasl = attributes.pop("sasl", {})
         if sasl_user and sasl_pass:
-            sasl["enabled"] = True
+            sasl["enable"] = True
             sasl["user"] = sasl_user
             sasl["password"] = sasl_pass
+            sasl["mechanism"] = "PLAIN"
         if sasl:
             attributes["sasl"] = sasl
         super().__init__(attributes=attributes, **kwargs)
 
-    def to_dataframe(self):
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
         raise mlrun.MLRunInvalidArgumentError(
             "KafkaSource does not support batch processing"
         )
 
     def add_nuclio_trigger(self, function):
-        extra_attributes = copy(self.attributes)
+        if self.path and self.path.startswith("ds://"):
+            datastore_profile = datastore_profile_read(self.path)
+            extra_attributes = datastore_profile.attributes()
+        else:
+            extra_attributes = copy(self.attributes)
         partitions = extra_attributes.pop("partitions", None)
+        explicit_ack_mode = None
+        engine = "async"
+        if hasattr(function.spec, "graph") and function.spec.graph.engine:
+            engine = function.spec.graph.engine
+
+        if mlrun.mlconf.is_explicit_ack_enabled() and engine == "async":
+            explicit_ack_mode = "explicitOnly"
+            extra_attributes["workerAllocationMode"] = extra_attributes.get(
+                "worker_allocation_mode", "static"
+            )
+        else:
+            extra_attributes["workerAllocationMode"] = extra_attributes.get(
+                "worker_allocation_mode", "pool"
+            )
+
+        trigger_kwargs = {}
+
+        if "max_workers" in extra_attributes:
+            trigger_kwargs = {"max_workers": extra_attributes.pop("max_workers")}
+
         trigger = KafkaTrigger(
             brokers=extra_attributes.pop("brokers"),
             topics=extra_attributes.pop("topics"),
             partitions=partitions,
             consumer_group=extra_attributes.pop("group"),
             initial_offset=extra_attributes.pop("initial_offset"),
+            explicit_ack_mode=explicit_ack_mode,
             extra_attributes=extra_attributes,
+            **trigger_kwargs,
         )
-        func = function.add_trigger("kafka", trigger)
-        replicas = 1 if not partitions else len(partitions)
-        func.spec.min_replicas = replicas
-        func.spec.max_replicas = replicas
-        return func
+        function = function.add_trigger("kafka", trigger)
+
+        # ML-5499
+        bug_fix_version = "1.12.10"
+        if config.nuclio_version and semver.VersionInfo.parse(
+            config.nuclio_version
+        ) < semver.VersionInfo.parse(bug_fix_version):
+            warnings.warn(
+                f"Detected nuclio version {config.nuclio_version}, which is older "
+                f"than {bug_fix_version}. Forcing number of replicas of 1 in function '{function.metadata.name}'. "
+                f"To resolve this, please upgrade Nuclio."
+            )
+            function.spec.min_replicas = 1
+            function.spec.max_replicas = 1
+
+        return function
+
+    def to_spark_df(self, session, named_view=False, time_field=None, columns=None):
+        raise NotImplementedError(
+            "Conversion of a source of type 'KafkaSource' "
+            "to a Spark dataframe is not possible, as this operation is not supported by Spark"
+        )
+
+    def create_topics(
+        self,
+        num_partitions: int = 4,
+        replication_factor: int = 1,
+        topics: Optional[list[str]] = None,
+    ):
+        """
+        Create Kafka topics with the specified number of partitions and replication factor.
+
+        :param num_partitions:      number of partitions for the topics
+        :param replication_factor:  replication factor for the topics
+        :param topics:              list of topic names to create, if None,
+                                    the topics will be taken from the source attributes
+        """
+        from kafka.admin import KafkaAdminClient, NewTopic
+
+        brokers = self.attributes.get("brokers")
+        if not brokers:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "brokers must be specified in the KafkaSource attributes"
+            )
+        topics = topics or self.attributes.get("topics")
+        if not topics:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "topics must be specified in the KafkaSource attributes"
+            )
+        new_topics = [
+            NewTopic(topic, num_partitions, replication_factor) for topic in topics
+        ]
+        kafka_admin = KafkaAdminClient(
+            bootstrap_servers=brokers,
+            sasl_mechanism=self.attributes.get("sasl", {}).get("sasl_mechanism"),
+            sasl_plain_username=self.attributes.get("sasl", {}).get("username"),
+            sasl_plain_password=self.attributes.get("sasl", {}).get("password"),
+            sasl_kerberos_service_name=self.attributes.get("sasl", {}).get(
+                "sasl_kerberos_service_name", "kafka"
+            ),
+            sasl_kerberos_domain_name=self.attributes.get("sasl", {}).get(
+                "sasl_kerberos_domain_name"
+            ),
+            sasl_oauth_token_provider=self.attributes.get("sasl", {}).get("mechanism"),
+        )
+        try:
+            kafka_admin.create_topics(new_topics)
+        finally:
+            kafka_admin.close()
+        logger.info(
+            "Kafka topics created successfully",
+            topics=topics,
+            num_partitions=num_partitions,
+            replication_factor=replication_factor,
+        )
 
 
 class SQLSource(BaseSourceDriver):
@@ -870,23 +1233,24 @@ class SQLSource(BaseSourceDriver):
     def __init__(
         self,
         name: str = "",
-        chunksize: int = None,
-        key_field: str = None,
-        time_field: str = None,
-        schedule: str = None,
+        chunksize: Optional[int] = None,
+        key_field: Optional[str] = None,
+        time_field: Optional[str] = None,
+        schedule: Optional[str] = None,
         start_time: Optional[Union[datetime, str]] = None,
         end_time: Optional[Union[datetime, str]] = None,
-        db_url: str = None,
-        table_name: str = None,
-        spark_options: dict = None,
-        time_fields: List[str] = None,
+        db_url: Optional[str] = None,
+        table_name: Optional[str] = None,
+        spark_options: Optional[dict] = None,
+        parse_dates: Optional[list[str]] = None,
+        **kwargs,
     ):
         """
         Reads SqlDB as input source for a flow.
         example::
-            db_path = "mysql+pymysql://<username>:<password>@<host>:<port>/<db_name>"
+            db_url = "mysql+pymysql://<username>:<password>@<host>:<port>/<db_name>"
             source = SQLSource(
-                collection_name='source_name', db_path=self.db, key_field='key'
+                table_name='source_name', db_url=db_url, key_field='key'
             )
         :param name:            source name
         :param chunksize:       number of rows per chunk (default large single chunk)
@@ -902,20 +1266,24 @@ class SQLSource(BaseSourceDriver):
         :param table_name:      the name of the collection to access,
                                 from the current database
         :param spark_options:   additional spark read options
-        :param time_fields :    all the field to be parsed as timestamp.
+        :param parse_dates :    all the field to be parsed as timestamp.
         """
-
         db_url = db_url or mlrun.mlconf.sql.url
         if db_url is None:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "cannot specify without db_path arg or secret MLRUN_SQL__URL"
             )
+        if time_field:
+            if parse_dates:
+                parse_dates.append(time_field)
+            else:
+                parse_dates = [time_field]
         attrs = {
             "chunksize": chunksize,
             "spark_options": spark_options,
             "table_name": table_name,
             "db_path": db_url,
-            "time_fields": time_fields,
+            "parse_dates": parse_dates,
         }
         attrs = {key: value for key, value in attrs.items() if value is not None}
         super().__init__(
@@ -926,24 +1294,47 @@ class SQLSource(BaseSourceDriver):
             schedule=schedule,
             start_time=start_time,
             end_time=end_time,
+            **kwargs,
         )
 
-    def to_dataframe(self):
-        import sqlalchemy as db
+    def to_dataframe(
+        self,
+        columns=None,
+        df_module=None,
+        entities=None,
+        start_time=None,
+        end_time=None,
+        time_field=None,
+        additional_filters=None,
+    ):
+        import sqlalchemy as sqlalchemy
 
-        query = self.attributes.get("query", None)
+        mlrun.utils.helpers.additional_filters_warning(
+            additional_filters, self.__class__
+        )
         db_path = self.attributes.get("db_path")
         table_name = self.attributes.get("table_name")
-        if not query:
-            query = f"SELECT * FROM {table_name}"
+        parse_dates = self.attributes.get("parse_dates")
+        time_field = time_field or self.time_field
+        start_time = start_time or self.start_time
+        end_time = end_time or self.end_time
         if table_name and db_path:
-            engine = db.create_engine(db_path)
+            engine = sqlalchemy.create_engine(db_path)
+            query, parse_dates = _generate_sql_query_with_time_filter(
+                table_name=table_name,
+                engine=engine,
+                time_column=time_field,
+                parse_dates=parse_dates,
+                start_time=start_time,
+                end_time=end_time,
+            )
             with engine.connect() as con:
                 return pd.read_sql(
                     query,
                     con=con,
                     chunksize=self.attributes.get("chunksize"),
-                    parse_dates=self.attributes.get("time_fields"),
+                    parse_dates=parse_dates,
+                    columns=columns,
                 )
         else:
             raise mlrun.errors.MLRunInvalidArgumentError(

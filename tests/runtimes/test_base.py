@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import tempfile
 import pytest
 
 import mlrun.errors
+import mlrun.runtimes.mounts
 from mlrun.config import config as mlconf
 from mlrun.runtimes import KubejobRuntime
 from mlrun.runtimes.pod import AutoMountType
@@ -82,46 +83,82 @@ class TestAutoMount:
         "requirements,encoded_requirements",
         [
             # strip spaces
-            (["pandas==1.0.0", "numpy==1.0.0 "], "pandas==1.0.0 numpy==1.0.0"),
+            (["pandas==1.0.0", "numpy==1.0.0 "], ["pandas==1.0.0", "numpy==1.0.0"]),
             # handle ranges
-            (["pandas>=1.0.0, <2"], "'pandas>=1.0.0, <2'"),
-            (["pandas>=1.0.0,<2"], "'pandas>=1.0.0,<2'"),
+            (["pandas>=1.0.0, <2"], ["pandas>=1.0.0, <2"]),
+            (["pandas>=1.0.0,<2"], ["pandas>=1.0.0,<2"]),
             # handle flags
-            (["-r somewhere/requirements.txt"], "-r somewhere/requirements.txt"),
+            (["-r somewhere/requirements.txt"], ["-r somewhere/requirements.txt"]),
             # handle flags and specific
             # handle escaping within specific
             (
                 ["-r somewhere/requirements.txt", "pandas>=1.0.0, <2"],
-                "-r somewhere/requirements.txt 'pandas>=1.0.0, <2'",
+                ["-r somewhere/requirements.txt", "pandas>=1.0.0, <2"],
             ),
             # handle from git
             (
                 ["something @ git+https://somewhere.com/a/b.git@v0.0.0#egg=something"],
-                "'something @ git+https://somewhere.com/a/b.git@v0.0.0#egg=something'",
+                ["something @ git+https://somewhere.com/a/b.git@v0.0.0#egg=something"],
             ),
             # handle comments
-            (["# dont care", "faker"], "faker"),
-            (["faker # inline dontcare"], "faker"),
-            (["faker #inline dontcare2"], "faker"),
+            (["# dont care", "faker"], ["faker"]),
+            (["faker # inline dontcare"], ["faker"]),
+            (["faker #inline dontcare2"], ["faker"]),
+            (
+                [
+                    "numpy==1.0.0 ",
+                    "pandas>=1.0.0, <2",
+                    "# dont care",
+                    "pandas2>=1.0.0,<2 # just an inline comment",
+                    "-r somewhere/requirements.txt",
+                    "something @ git+https://somewhere.com/a/b.git@v0.0.0#egg=something",
+                ],
+                [
+                    "numpy==1.0.0",
+                    "pandas>=1.0.0, <2",
+                    "pandas2>=1.0.0,<2",
+                    "-r somewhere/requirements.txt",
+                    "something @ git+https://somewhere.com/a/b.git@v0.0.0#egg=something",
+                ],
+            ),
         ],
     )
-    def test_encode_requirements(self, requirements, encoded_requirements):
-        for requirements_as_file in [True, False]:
-            if requirements_as_file:
+    def test_resolve_requirements(self, requirements, encoded_requirements):
+        encoded = self._generate_runtime().spec.build._resolve_requirements(
+            requirements
+        )
+        assert encoded == encoded_requirements, f"Failed to encode {requirements}"
 
-                # create a temporary file with the requirements
-                with tempfile.NamedTemporaryFile(
-                    delete=False, dir=self._temp_dir
-                ) as temp_file:
-                    with open(temp_file.name, "w") as f:
-                        for requirement in requirements:
-                            f.write(requirement + "\n")
-                    requirements = temp_file.name
+    @pytest.mark.parametrize(
+        "requirements,requirements_in_file,encoded_requirements",
+        [
+            (
+                ["pandas==1.0.0", "numpy==1.0.0"],
+                ["something==1.0.0", "otherthing==1.0.0"],
+                [
+                    "something==1.0.0",
+                    "otherthing==1.0.0",
+                    "pandas==1.0.0",
+                    "numpy==1.0.0",
+                ],
+            ),
+        ],
+    )
+    def test_resolve_requirements_file(
+        self,
+        requirements,
+        requirements_in_file,
+        encoded_requirements,
+    ):
+        # create requirements file
+        requirements_file = self._create_temp_requirements_file(requirements_in_file)
 
-            encoded = self._generate_runtime()._encode_requirements(requirements)
-            assert (
-                encoded == encoded_requirements
-            ), f"Failed to encode {requirements} as file {requirements_as_file}"
+        encoded = self._generate_runtime().spec.build._resolve_requirements(
+            requirements, requirements_file
+        )
+        assert (
+            encoded == encoded_requirements
+        ), f"Failed to encode {requirements.extend(requirements_in_file)} as file {requirements_file}"
 
     def test_fill_credentials(self, rundb_mock):
         """
@@ -129,7 +166,7 @@ class TestAutoMount:
         through the request headers
         """
         os.environ[
-            mlrun.runtimes.constants.FunctionEnvironmentVariables.auth_session
+            mlrun.common.runtimes.constants.FunctionEnvironmentVariables.auth_session
         ] = "some-access-key"
 
         runtime = self._generate_runtime()
@@ -207,7 +244,7 @@ class TestAutoMount:
         mlconf.storage.auto_mount_params = pvc_params_str
 
         runtime = self._generate_runtime()
-        runtime.apply(mlrun.auto_mount())
+        runtime.apply(mlrun.runtimes.mounts.auto_mount())
         assert runtime.spec.disable_auto_mount
 
         self._execute_run(runtime)
@@ -217,9 +254,9 @@ class TestAutoMount:
         # This won't work if mount type is not pvc
         mlconf.storage.auto_mount_type = "auto"
         with pytest.raises(
-            ValueError, match="failed to auto mount, need to set env vars"
+            ValueError, match="Failed to auto mount, need to set env vars"
         ):
-            runtime.apply(mlrun.auto_mount())
+            runtime.apply(mlrun.runtimes.mounts.auto_mount())
 
     @staticmethod
     def _setup_s3_mount(use_secret, non_anonymous):
@@ -273,3 +310,21 @@ class TestAutoMount:
         rundb_mock.reset()
         self._execute_run(runtime)
         rundb_mock.assert_env_variables(expected_env)
+
+    def _create_temp_requirements_file(self, requirements):
+        with tempfile.NamedTemporaryFile(
+            delete=False, dir=self._temp_dir, suffix=".txt"
+        ) as temp_file:
+            with open(temp_file.name, "w") as f:
+                for requirement in requirements:
+                    f.write(requirement + "\n")
+            return temp_file.name
+
+    def test_runtime_set_categories(self, rundb_mock):
+        expected_categories = ["aaa", "bbb"]
+
+        runtime = self._generate_runtime()
+        runtime.set_categories(expected_categories)
+        self._execute_run(runtime)
+
+        rundb_mock.assert_runtime_categories(expected_categories)

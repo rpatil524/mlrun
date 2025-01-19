@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,39 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import getpass
 import hashlib
 import json
 import os
 import re
-import typing
-from copy import deepcopy
 from io import StringIO
 from sys import stderr
+from typing import Optional
 
 import pandas as pd
-from kubernetes import client
 
 import mlrun
-import mlrun.builder
+import mlrun.common.constants
+import mlrun.common.constants as mlrun_constants
+import mlrun.common.schemas
 import mlrun.utils.regex
-from mlrun.api.utils.clients import nuclio
-from mlrun.db import get_run_db
+from mlrun.artifacts import TableArtifact
+from mlrun.common.runtimes.constants import RunLabels
+from mlrun.config import config
 from mlrun.errors import err_to_str
 from mlrun.frameworks.parallel_coordinates import gen_pcp_plot
-from mlrun.k8s_utils import get_k8s_helper
-from mlrun.runtimes.constants import MPIJobCRDVersions
-
-from ..artifacts import TableArtifact
-from ..config import config
-from ..utils import get_in, helpers, logger, verify_field_regex
-from .generators import selector
+from mlrun.runtimes.generators import selector
+from mlrun.utils import get_in, helpers, logger, verify_field_regex
 
 
 class RunError(Exception):
     pass
-
-
-mlrun_key = "mlrun/"
 
 
 class _ContextStore:
@@ -60,88 +54,12 @@ class _ContextStore:
 global_context = _ContextStore()
 
 
-cached_mpijob_crd_version = None
-cached_nuclio_version = None
-
-
-# resolve mpijob runtime according to the mpi-operator's supported crd-version
-# if specified on mlrun config set it likewise,
-# if not specified, try resolving it according to the mpi-operator, otherwise set to default
-# since this is a heavy operation (sending requests to k8s/API), and it's unlikely that the crd version
-# will change in any context - cache it
-def resolve_mpijob_crd_version(api_context=False):
-    global cached_mpijob_crd_version
-    if not cached_mpijob_crd_version:
-
-        # config override everything
-        mpijob_crd_version = config.mpijob_crd_version
-
-        if not mpijob_crd_version:
-            in_k8s_cluster = get_k8s_helper(
-                silent=True
-            ).is_running_inside_kubernetes_cluster()
-            if in_k8s_cluster:
-                k8s_helper = get_k8s_helper()
-                namespace = k8s_helper.resolve_namespace()
-
-                # try resolving according to mpi-operator that's running
-                res = k8s_helper.list_pods(
-                    namespace=namespace, selector="component=mpi-operator"
-                )
-                if len(res) > 0:
-                    mpi_operator_pod = res[0]
-                    mpijob_crd_version = mpi_operator_pod.metadata.labels.get(
-                        "crd-version"
-                    )
-            elif not in_k8s_cluster and not api_context:
-                # connect will populate the config from the server config
-                # TODO: something nicer
-                get_run_db()
-                mpijob_crd_version = config.mpijob_crd_version
-
-            # If resolution failed simply use default
-            if not mpijob_crd_version:
-                mpijob_crd_version = MPIJobCRDVersions.default()
-
-        if mpijob_crd_version not in MPIJobCRDVersions.all():
-            raise ValueError(
-                f"unsupported mpijob crd version: {mpijob_crd_version}. "
-                f"supported versions: {MPIJobCRDVersions.all()}"
-            )
-        cached_mpijob_crd_version = mpijob_crd_version
-
-    return cached_mpijob_crd_version
-
-
 def resolve_spark_operator_version():
     try:
         regex = re.compile("spark-([23])")
         return int(regex.findall(config.spark_operator_version)[0])
     except Exception:
         raise ValueError("Failed to resolve spark operator's version")
-
-
-# if nuclio version specified on mlrun config set it likewise,
-# if not specified, get it from nuclio api client
-# since this is a heavy operation (sending requests to API), and it's unlikely that the version
-# will change - cache it (this means if we upgrade nuclio, we need to restart mlrun to re-fetch the new version)
-def resolve_nuclio_version():
-    global cached_nuclio_version
-
-    if not cached_nuclio_version:
-
-        # config override everything
-        nuclio_version = config.nuclio_version
-        if not nuclio_version and config.nuclio_dashboard_url:
-            try:
-                nuclio_client = nuclio.Client()
-                nuclio_version = nuclio_client.get_dashboard_version()
-            except Exception as exc:
-                logger.warning("Failed to resolve nuclio version", exc=err_to_str(exc))
-
-        cached_nuclio_version = nuclio_version
-
-    return cached_nuclio_version
 
 
 def calc_hash(func, tag=""):
@@ -176,26 +94,10 @@ def log_std(db, runobj, out, err="", skip=False, show=True, silent=False):
             project = runobj.metadata.project or ""
             db.store_log(uid, project, out.encode(), append=True)
     if err:
-        logger.error(f"exec error - {err_to_str(err)}")
+        logger.error(f"Exec error - {err_to_str(err)}")
         print(err, file=stderr)
         if not silent:
             raise RunError(err)
-
-
-class AsyncLogWriter:
-    def __init__(self, db, runobj):
-        self.db = db
-        self.uid = runobj.metadata.uid
-        self.project = runobj.metadata.project or ""
-        self.iter = runobj.metadata.iteration
-
-    def write(self, data):
-        if self.db:
-            self.db.store_log(self.uid, self.project, data, append=True)
-
-    def flush(self):
-        # todo: verify writes are large enough, if not cache and use flush
-        pass
 
 
 def add_code_metadata(path=""):
@@ -227,19 +129,26 @@ def add_code_metadata(path=""):
         ]
         if len(remotes) > 0:
             return f"{remotes[0]}#{repo.head.commit.hexsha}"
-    except (GitCommandNotFound, InvalidGitRepositoryError, NoSuchPathError, ValueError):
+
+    except (
+        InvalidGitRepositoryError,
+        NoSuchPathError,
+    ):
+        # Path is not part of a git repository or an invalid path (will fail later if it needs to)
         pass
+
+    except (GitCommandNotFound, ValueError) as exc:
+        logger.warning(
+            "Failed to add git metadata",
+            path=path,
+            error=err_to_str(exc),
+        )
     return None
-
-
-def set_if_none(struct, key, value):
-    if not struct.get(key):
-        struct[key] = value
 
 
 def results_to_iter(results, runspec, execution):
     if not results:
-        logger.error("got an empty results list in to_iter")
+        logger.error("Got an empty results list in to_iter")
         return
 
     iter = []
@@ -266,7 +175,7 @@ def results_to_iter(results, runspec, execution):
 
     if not iter:
         execution.set_state("completed", commit=True)
-        logger.warning("warning!, zero iteration results")
+        logger.warning("Warning!, zero iteration results")
         return
     if hasattr(pd, "json_normalize"):
         df = pd.json_normalize(iter).sort_values("iter")
@@ -281,10 +190,10 @@ def results_to_iter(results, runspec, execution):
     item, id = selector(results, criteria)
     if runspec.spec.selector and not id:
         logger.warning(
-            f"no best result selected, check selector ({criteria}) or results"
+            f"No best result selected, check selector ({criteria}) or results"
         )
     if id:
-        logger.info(f"best iteration={id}, used criteria {criteria}")
+        logger.info(f"Best iteration={id}, used criteria {criteria}")
     task = results[item] if id and results else None
     execution.log_iteration_results(id, summary, task)
 
@@ -302,7 +211,12 @@ def results_to_iter(results, runspec, execution):
 
 def log_iter_artifacts(execution, df, header):
     csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False, line_terminator="\n", encoding="utf-8")
+    df.to_csv(
+        csv_buffer,
+        index=False,
+        encoding="utf-8",
+        **mlrun.utils.line_terminator_kwargs(),
+    )
     try:
         # may fail due to lack of access credentials to the artifacts store
         execution.log_artifact(
@@ -322,34 +236,6 @@ def log_iter_artifacts(execution, df, header):
         )
     except Exception as exc:
         logger.warning(f"failed to log iter artifacts, {err_to_str(exc)}")
-
-
-def resolve_function_image_name(function, image: typing.Optional[str] = None) -> str:
-    project = function.metadata.project or config.default_project
-    name = function.metadata.name
-    tag = function.metadata.tag or "latest"
-    if image:
-        image_name_prefix = resolve_function_target_image_name_prefix(project, name)
-        registries_to_enforce_prefix = (
-            resolve_function_target_image_registries_to_enforce_prefix()
-        )
-        for registry in registries_to_enforce_prefix:
-            if image.startswith(registry):
-                prefix_with_registry = f"{registry}{image_name_prefix}"
-                if not image.startswith(prefix_with_registry):
-                    raise mlrun.errors.MLRunInvalidArgumentError(
-                        f"Configured registry enforces image name to start with this prefix: {image_name_prefix}"
-                    )
-        return image
-    return generate_function_image_name(project, name, tag)
-
-
-def generate_function_image_name(project: str, name: str, tag: str) -> str:
-    _, repository = helpers.get_parsed_docker_registry()
-    repository = helpers.get_docker_repository_or_default(repository)
-    return fill_function_image_name_template(
-        mlrun.builder.IMAGE_NAME_ENRICH_REGISTRY_PREFIX, repository, project, name, tag
-    )
 
 
 def fill_function_image_name_template(
@@ -373,7 +259,7 @@ def resolve_function_target_image_registries_to_enforce_prefix():
     registry, repository = helpers.get_parsed_docker_registry()
     repository = helpers.get_docker_repository_or_default(repository)
     return [
-        f"{mlrun.builder.IMAGE_NAME_ENRICH_REGISTRY_PREFIX}{repository}/",
+        f"{mlrun.common.constants.IMAGE_NAME_ENRICH_REGISTRY_PREFIX}{repository}/",
         f"{registry}/{repository}/",
     ]
 
@@ -385,84 +271,11 @@ def set_named_item(obj, item):
         obj[item.name] = item
 
 
-def set_item_attribute(item, attribute, value):
-    if isinstance(item, dict):
-        item[attribute] = value
-    else:
-        setattr(item, attribute, value)
-
-
 def get_item_name(item, attr="name"):
     if isinstance(item, dict):
         return item.get(attr)
     else:
         return getattr(item, attr, None)
-
-
-def apply_kfp(modify, cop, runtime):
-    modify(cop)
-
-    # Have to do it here to avoid circular dependencies
-    from .pod import AutoMountType
-
-    if AutoMountType.is_auto_modifier(modify):
-        runtime.spec.disable_auto_mount = True
-
-    api = client.ApiClient()
-    for k, v in cop.pod_labels.items():
-        runtime.metadata.labels[k] = v
-    for k, v in cop.pod_annotations.items():
-        runtime.metadata.annotations[k] = v
-    if cop.container.env:
-        env_names = [
-            e.name if hasattr(e, "name") else e["name"] for e in runtime.spec.env
-        ]
-        for e in api.sanitize_for_serialization(cop.container.env):
-            name = e["name"]
-            if name in env_names:
-                runtime.spec.env[env_names.index(name)] = e
-            else:
-                runtime.spec.env.append(e)
-                env_names.append(name)
-        cop.container.env.clear()
-
-    if cop.volumes and cop.container.volume_mounts:
-        vols = api.sanitize_for_serialization(cop.volumes)
-        mounts = api.sanitize_for_serialization(cop.container.volume_mounts)
-        runtime.spec.update_vols_and_mounts(vols, mounts)
-        cop.volumes.clear()
-        cop.container.volume_mounts.clear()
-
-    return runtime
-
-
-def get_resource_labels(function, run=None, scrape_metrics=None):
-    scrape_metrics = (
-        scrape_metrics if scrape_metrics is not None else config.scrape_metrics
-    )
-    run_uid, run_name, run_project, run_owner = None, None, None, None
-    if run:
-        run_uid = run.metadata.uid
-        run_name = run.metadata.name
-        run_project = run.metadata.project
-        run_owner = run.metadata.labels.get("owner")
-    labels = deepcopy(function.metadata.labels)
-    labels[mlrun_key + "class"] = function.kind
-    labels[mlrun_key + "project"] = run_project or function.metadata.project
-    labels[mlrun_key + "function"] = str(function.metadata.name)
-    labels[mlrun_key + "tag"] = str(function.metadata.tag or "latest")
-    labels[mlrun_key + "scrape-metrics"] = str(scrape_metrics)
-
-    if run_uid:
-        labels[mlrun_key + "uid"] = run_uid
-
-    if run_name:
-        labels[mlrun_key + "name"] = run_name
-
-    if run_owner:
-        labels[mlrun_key + "owner"] = run_owner
-
-    return labels
 
 
 def verify_limits(
@@ -476,20 +289,26 @@ def verify_limits(
         verify_field_regex(
             f"function.spec.{resources_field_name}.limits.memory",
             mem,
-            mlrun.utils.regex.k8s_resource_quantity_regex,
+            mlrun.utils.regex.k8s_resource_quantity_regex
+            + mlrun.utils.regex.pipeline_param,
+            mode=mlrun.common.schemas.RegexMatchModes.any,
         )
     if cpu:
         verify_field_regex(
             f"function.spec.{resources_field_name}.limits.cpu",
             cpu,
-            mlrun.utils.regex.k8s_resource_quantity_regex,
+            mlrun.utils.regex.k8s_resource_quantity_regex
+            + mlrun.utils.regex.pipeline_param,
+            mode=mlrun.common.schemas.RegexMatchModes.any,
         )
     # https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/
     if gpus:
         verify_field_regex(
             f"function.spec.{resources_field_name}.limits.gpus",
             gpus,
-            mlrun.utils.regex.k8s_resource_quantity_regex,
+            mlrun.utils.regex.k8s_resource_quantity_regex
+            + mlrun.utils.regex.pipeline_param,
+            mode=mlrun.common.schemas.RegexMatchModes.any,
         )
     return generate_resources(mem=mem, cpu=cpu, gpus=gpus, gpu_type=gpu_type)
 
@@ -503,13 +322,17 @@ def verify_requests(
         verify_field_regex(
             f"function.spec.{resources_field_name}.requests.memory",
             mem,
-            mlrun.utils.regex.k8s_resource_quantity_regex,
+            mlrun.utils.regex.k8s_resource_quantity_regex
+            + mlrun.utils.regex.pipeline_param,
+            mode=mlrun.common.schemas.RegexMatchModes.any,
         )
     if cpu:
         verify_field_regex(
             f"function.spec.{resources_field_name}.requests.cpu",
             cpu,
-            mlrun.utils.regex.k8s_resource_quantity_regex,
+            mlrun.utils.regex.k8s_resource_quantity_regex
+            + mlrun.utils.regex.pipeline_param,
+            mode=mlrun.common.schemas.RegexMatchModes.any,
         )
     return generate_resources(mem=mem, cpu=cpu)
 
@@ -548,51 +371,11 @@ def generate_resources(mem=None, cpu=None, gpus=None, gpu_type="nvidia.com/gpu")
 
 
 def get_func_selector(project, name=None, tag=None):
-    s = [f"{mlrun_key}project={project}"]
+    s = [f"{mlrun_constants.MLRunInternalLabels.project}={project}"]
     if name:
-        s.append(f"{mlrun_key}function={name}")
-        s.append(f"{mlrun_key}tag={tag or 'latest'}")
+        s.append(f"{mlrun_constants.MLRunInternalLabels.function}={name}")
+        s.append(f"{mlrun_constants.MLRunInternalLabels.tag}={tag or 'latest'}")
     return s
-
-
-def parse_function_selector(selector: typing.List[str]) -> typing.Tuple[str, str, str]:
-    project, name, tag = None, None, None
-    for criteria in selector:
-        if f"{mlrun_key}project=" in criteria:
-            project = criteria[f"{mlrun_key}project=":]
-        if f"{mlrun_key}function=" in criteria:
-            name = criteria[f"{mlrun_key}function=":]
-        if f"{mlrun_key}tag=" in criteria:
-            tag = criteria[f"{mlrun_key}tag=":]
-    return project, name, tag
-
-
-class k8s_resource:
-    kind = ""
-    per_run = False
-    per_function = False
-    k8client = None
-
-    def deploy_function(self, function):
-        pass
-
-    def release_function(self, function):
-        pass
-
-    def submit_run(self, function, runobj):
-        pass
-
-    def get_object(self, name, namespace=None):
-        return None
-
-    def get_status(self, name, namespace=None):
-        return None
-
-    def del_object(self, name, namespace=None):
-        pass
-
-    def get_pods(self, name, namespace=None, master=False):
-        return {}
 
 
 def enrich_function_from_dict(function, function_dict):
@@ -602,6 +385,7 @@ def enrich_function_from_dict(function, function_dict):
         "volume_mounts",
         "env",
         "resources",
+        "image",
         "image_pull_policy",
         "replicas",
         "node_name",
@@ -645,3 +429,54 @@ def enrich_function_from_dict(function, function_dict):
             else:
                 setattr(function.spec, attribute, override_value)
     return function
+
+
+def enrich_run_labels(
+    labels: dict,
+    labels_to_enrich: Optional[list[RunLabels]] = None,
+):
+    labels_enrichment = {
+        RunLabels.owner: os.environ.get("V3IO_USERNAME") or getpass.getuser(),
+        # TODO: remove this in 1.9.0
+        RunLabels.v3io_user: os.environ.get("V3IO_USERNAME"),
+    }
+    labels_to_enrich = labels_to_enrich or RunLabels.all()
+    for label in labels_to_enrich:
+        enrichment = labels_enrichment.get(label)
+        if label.value not in labels and enrichment:
+            labels[label.value] = enrichment
+    return labels
+
+
+def resolve_node_selectors(
+    project_node_selector: dict, instance_node_selector: dict
+) -> dict:
+    config_node_selector = mlrun.mlconf.get_default_function_node_selector()
+    if project_node_selector or config_node_selector:
+        mlrun.utils.logger.debug(
+            "Enriching node selector from project and mlrun config",
+            project_node_selector=project_node_selector,
+            config_node_selector=config_node_selector,
+        )
+        return mlrun.utils.helpers.merge_dicts_with_precedence(
+            config_node_selector,
+            project_node_selector,
+            instance_node_selector,
+        )
+    return instance_node_selector
+
+
+def enrich_gateway_timeout_annotations(annotations: dict, gateway_timeout: int):
+    """
+    Set gateway proxy connect/read/send timeout annotations
+    :param annotations:     The annotations to enrich
+    :param gateway_timeout: The timeout to set
+    """
+    if not gateway_timeout:
+        return
+    gateway_timeout_str = str(gateway_timeout)
+    annotations["nginx.ingress.kubernetes.io/proxy-connect-timeout"] = (
+        gateway_timeout_str
+    )
+    annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] = gateway_timeout_str
+    annotations["nginx.ingress.kubernetes.io/proxy-send-timeout"] = gateway_timeout_str

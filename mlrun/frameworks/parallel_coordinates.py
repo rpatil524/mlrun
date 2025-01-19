@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-import datetime
+
 import os
-from typing import List, Union
+from datetime import datetime
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-from IPython.core.display import HTML, display
+from IPython.display import HTML, display
 from pandas.api.types import is_numeric_dtype, is_string_dtype
 
 import mlrun
@@ -48,7 +48,7 @@ def _gen_dropdown_buttons(output_cols) -> list:
 
 
 def _gen_dimensions(
-    df: pd.DataFrame, col: str, prefix: str = None, is_index=False
+    df: pd.DataFrame, col: str, prefix: Optional[str] = None, is_index=False
 ) -> dict:
     """
     Computes the plotting dimensions of each parameter/output col according to its type.
@@ -107,8 +107,8 @@ def gen_pcp_plot(
     source_df: pd.DataFrame,
     index_col: str,
     hide_identical: bool = True,
-    exclude: list = None,
-    colorscale: str = None,
+    exclude: Optional[list] = None,
+    colorscale: Optional[str] = None,
 ):
     """
     Creates a list composed of the data to be plotted as a Parallel Coordinate, this includes
@@ -215,7 +215,7 @@ def _show_and_export_html(html: str, show=None, filename=None, runs_list=None):
                 fp.write("</body></html>")
             else:
                 fp.write(html)
-    if show or (show is None and mlrun.utils.is_ipython):
+    if show or (show is None and mlrun.utils.is_jupyter):
         display(HTML(html))
         if runs_list and len(runs_list) <= max_table_rows:
             display(HTML(html_table))
@@ -238,13 +238,13 @@ def _runs_list_to_df(runs_list, extend_iterations=False):
 
 @filter_warnings("ignore", FutureWarning)
 def compare_run_objects(
-    runs_list: Union[mlrun.model.RunObject, List[mlrun.model.RunObject]],
+    runs_list: Union[mlrun.model.RunObject, list[mlrun.model.RunObject]],
     hide_identical: bool = True,
-    exclude: list = None,
-    show: bool = None,
+    exclude: Optional[list] = None,
+    show: Optional[bool] = None,
     extend_iterations=True,
     filename=None,
-    colorscale: str = None,
+    colorscale: Optional[str] = None,
 ):
     """return/show parallel coordinates plot + table to compare between a list of runs or run iterations
 
@@ -292,9 +292,9 @@ def compare_db_runs(
     run_name=None,
     labels=None,
     iter=False,
-    start_time_from: datetime = None,
+    start_time_from: Optional[datetime] = None,
     hide_identical: bool = True,
-    exclude: list = [],
+    exclude: Optional[list] = None,
     show=None,
     colorscale: str = "Blues",
     filename=None,
@@ -331,6 +331,7 @@ def compare_db_runs(
         **query_args,
     )
 
+    exclude = exclude or []
     runs_df = _runs_list_to_df(runs_list)
     plot_as_html = gen_pcp_plot(
         runs_df,

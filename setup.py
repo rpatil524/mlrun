@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-try:
-    from setuptools import setup
-except ImportError:
-    from distutils.core import setup
 
 import json
 import logging
+import re
+
+from setuptools import setup
 
 import dependencies
 import packages
@@ -30,7 +29,9 @@ def version():
     try:
         with open("mlrun/utils/version/version.json") as version_file:
             version_metadata = json.load(version_file)
-            return version_metadata["version"]
+            version_ = version_metadata["version"]
+            # replace "1.4.0-rc1+rca" with "1.4.0rc1+rca"
+            return re.sub(r"(\d+\.\d+\.\d+)-rc(\d+)", r"\1rc\2", version_)
     except (ValueError, KeyError, FileNotFoundError):
         # When installing un-released version (e.g. by doing
         # pip install git+https://github.com/mlrun/mlrun@development)
@@ -51,14 +52,22 @@ setup(
     long_description_content_type="text/markdown",
     author="Yaron Haviv",
     author_email="yaronh@iguazio.com",
-    license="MIT",
+    license="Apache License 2.0",
     url="https://github.com/mlrun/mlrun",
     packages=packages.packages(
         exclude_packages=[
-            "mlrun.api.migrations_sqlite.tests",
-            "mlrun.api.proto",
+            "server",
         ]
     ),
+    package_data={"mlrun": ["runtimes/nuclio/application/*.go"]},
+    keywords=[
+        "mlrun",
+        "mlops",
+        "data-science",
+        "machine-learning",
+        "experiment-tracking",
+    ],
+    python_requires=">=3.9, <3.12",
     install_requires=dependencies.base_requirements(),
     tests_require=dependencies.dev_requirements(),
     extras_require=dependencies.extra_requirements(),
@@ -70,8 +79,7 @@ setup(
         "Operating System :: Microsoft :: Windows",
         "Operating System :: MacOS",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python",
         "Topic :: Software Development :: Libraries :: Python Modules",
         "Topic :: Software Development :: Libraries",

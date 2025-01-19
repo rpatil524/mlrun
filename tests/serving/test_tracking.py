@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,14 @@
 #
 import json
 from pprint import pprint
+from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 import mlrun
+from mlrun.common.schemas import ModelEndpointCreationStrategy
+from tests.serving.test_serving import _log_model
 
 testdata = '{"inputs": [[5, 6]]}'
 
@@ -38,7 +42,7 @@ class ModelTestingCustomTrack(ModelTestingClass):
         return [[1]], [self.get_param("multiplier", 1)]
 
 
-def test_tracking():
+def test_tracking(rundb_mock):
     # test that predict() was tracked properly in the stream
     fn = mlrun.new_function("tests", kind="serving")
     fn.add_model("my", ".", class_name=ModelTestingClass(multiplier=2))
@@ -52,7 +56,7 @@ def test_tracking():
     assert rec_to_data(fake_stream[0]) == ("my", "ModelTestingClass", [[5, 6]], [10])
 
 
-def test_custom_tracking():
+def test_custom_tracking(rundb_mock):
     # test custom values tracking (using the logged_results() hook)
     fn = mlrun.new_function("tests", kind="serving")
     fn.add_model("my", ".", class_name=ModelTestingCustomTrack(multiplier=2))
@@ -66,7 +70,7 @@ def test_custom_tracking():
     assert rec_to_data(fake_stream[0]) == ("my", "ModelTestingCustomTrack", [[1]], [2])
 
 
-def test_ensemble_tracking():
+def test_ensemble_tracking(rundb_mock):
     # test proper tracking of an ensemble (router + models are logged)
     fn = mlrun.new_function("tests", kind="serving")
     fn.set_topology("router", mlrun.serving.VotingEnsemble(vote_type="regression"))
@@ -91,6 +95,32 @@ def test_ensemble_tracking():
         "2": ["ModelTestingClass", [[5, 6]], [15]],
         "VotingEnsemble": ["VotingEnsemble", [[5, 6]], [12.5]],
     }
+
+
+@pytest.mark.parametrize("enable_tracking", [True, False])
+def test_tracked_function(rundb_mock, enable_tracking):
+    with patch("mlrun.get_run_db", return_value=rundb_mock):
+        project = mlrun.new_project("test-pro", save=False)
+        fn = mlrun.new_function("test-fn", kind="serving", project=project.name)
+        model_uri = _log_model(project)
+        fn.add_model(
+            "m1",
+            model_uri,
+            "ModelTestingClass",
+            multiplier=5,
+            creation_strategy=ModelEndpointCreationStrategy.ARCHIVE,
+        )
+        fn.set_tracking("dummy://", enable_tracking=enable_tracking)
+        server = fn.to_mock_server()
+        server.test("/v2/models/m1/infer", testdata)
+        dummy_stream = server.context.stream.output_stream
+        if enable_tracking:
+            rundb_mock.get_model_endpoint.assert_called_once()
+            assert (
+                len(dummy_stream.event_list) == 1
+            ), "expected stream to get one message"
+        else:
+            assert len(dummy_stream.event_list) == 0, "expected stream to be empty"
 
 
 def rec_to_data(rec):

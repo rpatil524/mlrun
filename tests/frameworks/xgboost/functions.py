@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from typing import Optional
+
 import xgboost as xgb
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor
@@ -26,7 +28,9 @@ from ..ml_functions import MLFunctions
 class XGBoostFunctions(MLFunctions):
     @staticmethod
     def train(
-        context: mlrun.MLClientCtx, algorithm_functionality: str, model_name: str = None
+        context: mlrun.MLClientCtx,
+        algorithm_functionality: str,
+        model_name: Optional[str] = None,
     ):
         algorithm_functionality = AlgorithmFunctionality(algorithm_functionality)
         model = XGBoostFunctions.get_model(

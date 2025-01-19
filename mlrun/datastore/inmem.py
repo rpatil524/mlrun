@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ from io import BytesIO, StringIO
 import pandas as pd
 
 import mlrun
+import mlrun.utils.helpers
 
 from .base import DataStore, FileStats
 
@@ -35,7 +36,9 @@ class InMemoryStore(DataStore):
 
     def _get_item(self, key):
         if key not in self._items:
-            raise ValueError(f"item {key} not found in memory store")
+            raise mlrun.errors.MLRunNotFoundError(
+                f"item {key} not found in memory store"
+            )
         return self._items[key]
 
     def get(self, key, size=None, offset=0):
@@ -72,7 +75,7 @@ class InMemoryStore(DataStore):
             if columns:
                 kwargs["usecols"] = columns
             reader = df_module.read_csv
-        elif url.endswith(".parquet") or url.endswith(".pq") or format == "parquet":
+        elif mlrun.utils.helpers.is_parquet_file(url, format):
             if columns:
                 kwargs["columns"] = columns
             reader = df_module.read_parquet
@@ -80,5 +83,11 @@ class InMemoryStore(DataStore):
             reader = df_module.read_json
         else:
             raise mlrun.errors.MLRunInvalidArgumentError(f"file type unhandled {url}")
+        # InMemoryStore store – don't pass filters
+        for field in ["time_column", "start_time", "end_time", "additional_filters"]:
+            kwargs.pop(field, None)
 
         return reader(item, **kwargs)
+
+    def rm(self, path, recursive=False, maxdepth=None):
+        self._items.pop(path, None)

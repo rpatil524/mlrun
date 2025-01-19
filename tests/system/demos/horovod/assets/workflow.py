@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 #
 from kfp import dsl
 
-from mlrun import mount_v3io
+from mlrun.runtimes.mounts import mount_v3io
 
 funcs = {}
 

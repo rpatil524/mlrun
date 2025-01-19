@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,9 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
-from typing import Any, Dict, List, Tuple, Union
+
+from typing import Any, Optional, Union
 
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -35,23 +34,23 @@ def train(
     loss_function: Module,
     optimizer: Optimizer,
     validation_set: DataLoader = None,
-    metric_functions: List[PyTorchTypes.MetricFunctionType] = None,
+    metric_functions: Optional[list[PyTorchTypes.MetricFunctionType]] = None,
     scheduler=None,
     scheduler_step_frequency: Union[int, float, str] = "epoch",
     epochs: int = 1,
-    training_iterations: int = None,
-    validation_iterations: int = None,
-    callbacks_list: List[Callback] = None,
+    training_iterations: Optional[int] = None,
+    validation_iterations: Optional[int] = None,
+    callbacks_list: Optional[list[Callback]] = None,
     use_cuda: bool = True,
-    use_horovod: bool = None,
+    use_horovod: Optional[bool] = None,
     auto_log: bool = True,
-    model_name: str = None,
-    modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-    custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-    custom_objects_directory: str = None,
-    tensorboard_directory: str = None,
-    mlrun_callback_kwargs: Dict[str, Any] = None,
-    tensorboard_callback_kwargs: Dict[str, Any] = None,
+    model_name: Optional[str] = None,
+    modules_map: Optional[Union[dict[str, Union[None, str, list[str]]], str]] = None,
+    custom_objects_map: Optional[Union[dict[str, Union[str, list[str]]], str]] = None,
+    custom_objects_directory: Optional[str] = None,
+    tensorboard_directory: Optional[str] = None,
+    mlrun_callback_kwargs: Optional[dict[str, Any]] = None,
+    tensorboard_callback_kwargs: Optional[dict[str, Any]] = None,
     context: mlrun.MLClientCtx = None,
 ) -> PyTorchModelHandler:
     """
@@ -112,7 +111,7 @@ def train(
 
                                             {
                                                 "/.../custom_optimizer.py": "optimizer",
-                                                "/.../custom_layers.py": ["layer1", "layer2"]
+                                                "/.../custom_layers.py": ["layer1", "layer2"],
                                             }
 
                                         All the paths will be accessed from the given 'custom_objects_directory',
@@ -205,19 +204,19 @@ def evaluate(
     dataset: DataLoader,
     model: Module = None,
     loss_function: Module = None,
-    metric_functions: List[PyTorchTypes.MetricFunctionType] = None,
-    iterations: int = None,
-    callbacks_list: List[Callback] = None,
+    metric_functions: Optional[list[PyTorchTypes.MetricFunctionType]] = None,
+    iterations: Optional[int] = None,
+    callbacks_list: Optional[list[Callback]] = None,
     use_cuda: bool = True,
     use_horovod: bool = False,
     auto_log: bool = True,
-    model_name: str = None,
-    modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-    custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-    custom_objects_directory: str = None,
-    mlrun_callback_kwargs: Dict[str, Any] = None,
+    model_name: Optional[str] = None,
+    modules_map: Optional[Union[dict[str, Union[None, str, list[str]]], str]] = None,
+    custom_objects_map: Optional[Union[dict[str, Union[str, list[str]]], str]] = None,
+    custom_objects_directory: Optional[str] = None,
+    mlrun_callback_kwargs: Optional[dict[str, Any]] = None,
     context: mlrun.MLClientCtx = None,
-) -> Tuple[PyTorchModelHandler, List[PyTorchTypes.MetricValueType]]:
+) -> tuple[PyTorchModelHandler, list[PyTorchTypes.MetricValueType]]:
     """
     Use MLRun's PyTorch interface to evaluate the model with the given parameters. For more information and further
     options regarding the auto logging, see 'PyTorchMLRunInterface' documentation. Notice for auto-logging: In order to
@@ -264,7 +263,7 @@ def evaluate(
 
                                          {
                                              "/.../custom_optimizer.py": "optimizer",
-                                             "/.../custom_layers.py": ["layer1", "layer2"]
+                                             "/.../custom_layers.py": ["layer1", "layer2"],
                                          }
 
                                      All the paths will be accessed from the given 'custom_objects_directory', meaning
@@ -343,9 +342,9 @@ def evaluate(
 def _parse_callbacks_kwargs(
     handler: PyTorchModelHandler,
     tensorboard_directory: Union[str, None],
-    mlrun_callback_kwargs: Union[Dict[str, Any], None],
-    tensorboard_callback_kwargs: Union[Dict[str, Any], None],
-) -> Tuple[dict, dict]:
+    mlrun_callback_kwargs: Union[dict[str, Any], None],
+    tensorboard_callback_kwargs: Union[dict[str, Any], None],
+) -> tuple[dict, dict]:
     """
     Parse the given parameters into the MLRun and Tensorboard callbacks kwargs.
 

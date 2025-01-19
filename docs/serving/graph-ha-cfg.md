@@ -7,7 +7,7 @@ This figure illustrates a simplistic flow of an MLRun serving graph with remote 
 As explained in {ref}`serving-graph`, the serving graph is based on Nuclio functions. 
 
 **In this section**
-- [Using Nuclio with stream triggers](#using-Nuclio-with-stream-triggers)
+- [Using Nuclio with stream triggers](#using-nuclio-with-stream-triggers)
 - [Consumer function configuration](#consumer-function-configuration)
 - [Remote function retry mechanism](#remote-function-retry-mechanism)
 - [Configuration considerations](#configuration-considerations)
@@ -21,7 +21,11 @@ performs additional processing of events after the function handler returns, the
 lost. The mechanism of Window ACK provides a solution for such 
 stateful event processing.
 
-With Window ACK, the consumer group's committed offset is delayed by one window, committing the offset at (processed event num – window). 
+```{admonition} Note
+For stateful functions, each worker has its own state. See, for example, {py:meth}`~storey.transformations.MapWithState`.
+```
+
+With Window ACK, the consumer group's committed offset is delayed by one window, committing the offset at (processed event number – window). 
 When the function restarts (for any reason including scale-up or scale-down), it starts consuming from this last committed point. 
 
 The size of the required Window ACK is based on the number of events that could be in processing when the function terminates. You can 
@@ -32,9 +36,15 @@ graph structure and should be calculated accordingly. The following sections exp
 
 A consumer function is essentially a Nuclio function with a stream trigger. As part of the trigger, you can set a consumer group.  
 
-When the consumer function is part of a graph then the consumer function’s number of replicas is derived from the number of shards and is 
-therefore nonconfigurable. The same applies to the number of workers in each replica, which is set to 1 and is not configurable.  
-
+The number of replicas per function depends on the  source:
+- `StreamSource`: The number of replicas is derived from the number of shards and is therefore non-configurable. Furthermore, the number of workers in each replica is set to 1 and also is not configurable.  
+- `KafkaSource`: For Nuclio earlier than 1.12.10, it is 1 and non-configurable. For 1.12.10 and later, the number of replicas is set with, for example:
+   - `function.spec.min_replicas = 2`. Default = 1
+   - `function.spec.max_replicas = 3`. Default = 4	
+   
+   and the number of workers is set with:
+   - `KafkaSource(attributes={"max_workers": 1})`. Default = 1
+   
 The consumer function has one buffer per worker, measured in number of messages, holding the incoming events that were received by the worker and are waiting to be 
 processed. Once this buffer is full, events need to be processed so that the function is able to receive more events. The buffer size is 
 configurable and is key to the overall configuration. 
@@ -47,7 +57,7 @@ To set the buffer size:
 
 The default `buffer_size` is 8 (messages).
 
-## Remote function retry mechanism 
+## Remote function retry mechanism
 
 The required processing time of a remote function varies, depending on the function. The system assumes a processing 
 time in the order of seconds, which affects the default configurations. However, some functions require a longer processing time. 
@@ -109,7 +119,7 @@ and parameters that provide high availability, using a non-default configuration
 Make sure you thoroughly understand your serving graph and its functions before defining the `ack_window_size`. Its value depends on the 
 entire graph flow. You need to understand which steps are parallel (branching) vs. sequential invocation. Another key aspect is that the number of workers affects the window size.
       
-See the [ack_window_size API](../api/mlrun.runtimes.html#mlrun.runtimes.RemoteRuntime.add_v3io_stream_trigger).
+See the {py:class}`~mlrun.runtimes.RemoteRuntime.add_v3io_stream_trigger`.
 
 For example:  
 - If a graph includes: consumer -> remote r1 -> remote r2:

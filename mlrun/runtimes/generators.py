@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@ import json
 import random
 import sys
 from copy import deepcopy
+from typing import Optional
 
 import pandas as pd
 
@@ -26,7 +27,7 @@ default_max_iterations = 10
 default_max_errors = 3
 
 
-def get_generator(spec: RunSpec, execution, param_file_secrets: dict = None):
+def get_generator(spec: RunSpec, execution, param_file_secrets: Optional[dict] = None):
     options = spec.hyper_param_options
     strategy = spec.strategy or options.strategy
     if not spec.is_hyper_job() or strategy == "custom":
@@ -47,9 +48,28 @@ def get_generator(spec: RunSpec, execution, param_file_secrets: dict = None):
     obj = None
     if param_file:
         obj = execution.get_dataitem(param_file, secrets=param_file_secrets)
-        if not strategy and obj.suffix == ".csv":
-            strategy = "list"
-        if not strategy or strategy in ["grid", "random"]:
+
+        # for csv files, it will contain a list of iterations to run.
+        # its strategy must be a list, since grid and random strategies would yield a different
+        # results than expected.
+        # e.g.:
+        # param file:
+        # p1 | p2
+        # 1  | 2
+        # 3  | 4
+        # ------
+        # while strategy is grid, the number iteration would be the matrix of the two params instead of two.
+        # thus, ignored.
+        if obj.suffix == ".csv":
+            if not strategy:
+                strategy = "list"
+
+            if strategy in ["grid", "random"]:
+                raise ValueError(
+                    "CSV param file cannot be used with grid or random strategy, "
+                    "use a JSON file for parameters or leave empty."
+                )
+        elif not strategy or strategy in ["grid", "random"]:
             hyperparams = json.loads(obj.get())
 
     if not strategy or strategy == "grid":

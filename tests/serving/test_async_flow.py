@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from typing import Optional
+
+import pytest
+
 import mlrun
+from mlrun.errors import MLRunInvalidArgumentError
+from mlrun.serving import Model, ModelRunnerStep, ModelSelector
 from mlrun.utils import logger
 from tests.conftest import results
 
@@ -31,13 +37,13 @@ def test_async_basic():
         "$queue", "q1", path=""
     )
 
-    s2 = queue.to(name="s2", class_name="ChainWithContext")
+    s2 = queue.to(name="s2", class_name="ChainWithContext", function="some_function")
     s2.to(name="s4", class_name="ChainWithContext")
     s2.to(
         name="s5", class_name="ChainWithContext"
     ).respond()  # this state returns the resp
 
-    queue.to(name="s3", class_name="ChainWithContext")
+    queue.to(name="s3", class_name="ChainWithContext", function="some_other_function")
 
     # plot the graph for test & debug
     flow.plot(f"{results}/serving/async.png")
@@ -58,6 +64,20 @@ def test_async_basic():
     }, "flow didnt visit expected states"
 
 
+def test_async_error_on_missing_function_parameter():
+    function = mlrun.new_function("tests", kind="serving")
+    flow = function.set_topology("flow", engine="async")
+    queue = flow.to(name="s1", class_name="ChainWithContext").to(
+        "$queue", "q1", path=""
+    )
+
+    with pytest.raises(
+        MLRunInvalidArgumentError,
+        match="step 's2' must specify a function, because it follows a queue step",
+    ):
+        queue.to(name="s2", class_name="ChainWithContext")
+
+
 def test_async_nested():
     function = mlrun.new_function("tests", kind="serving")
     graph = function.set_topology("flow", engine="async")
@@ -74,7 +94,6 @@ def test_async_nested():
 
     graph.add_step(name="final", class_name="Echo", after="ensemble").respond()
 
-    logger.info(graph.to_yaml())
     server = function.to_mock_server()
 
     # plot the graph for test & debug
@@ -89,22 +108,25 @@ def test_on_error():
     function = mlrun.new_function("tests", kind="serving")
     graph = function.set_topology("flow", engine="async")
     chain = graph.to("Chain", name="s1")
-    chain.to("Raiser").error_handler("catch").to("Chain", name="s3")
+    chain.to("Raiser").error_handler(
+        name="catch", class_name="EchoError", full_event=True
+    ).to("Chain", name="s3")
 
-    graph.add_step(
-        name="catch", class_name="EchoError", after=""
-    ).respond().full_event = True
     function.verbose = True
     server = function.to_mock_server()
-    logger.info(graph.to_yaml())
 
     # plot the graph for test & debug
     graph.plot(f"{results}/serving/on_error.png")
     resp = server.test(body=[])
     server.wait_for_completion()
-    assert (
-        resp["error"] and resp["origin_state"] == "Raiser"
-    ), f"error wasnt caught, resp={resp}"
+    if isinstance(resp, dict):
+        assert (
+            resp["error"] and resp["origin_state"] == "Raiser"
+        ), f"error wasn't caught, resp={resp}"
+    else:
+        assert (
+            resp.error and resp.origin_state == "Raiser"
+        ), f"error wasn't caught, resp={resp}"
 
 
 def test_push_error():
@@ -118,7 +140,75 @@ def test_push_error():
     server.error_stream = "dummy:///nothing"
     # Force an error inside push_error itself
     server._error_stream_object = _DummyStreamRaiser()
-    logger.info(graph.to_yaml())
 
     server.test(body=[])
     server.wait_for_completion()
+
+
+class MyModel(Model):
+    execution_mechanism = "naive"
+
+    def __init__(self, *args, inc: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inc = inc
+
+    def predict(self, body):
+        body["n"] += self.inc
+        body.pop("models", None)
+        return body
+
+    async def predict_async(self, body):
+        return self.predict(body)
+
+
+def test_model_runner():
+    function = mlrun.new_function("tests", kind="serving")
+    graph = function.set_topology("flow", engine="async")
+    model_runner_step = ModelRunnerStep(name="my_model_runner")
+    model_runner_step.add_model(MyModel(name="my_model", inc=1))
+    graph.to(model_runner_step).respond()
+
+    server = function.to_mock_server()
+    try:
+        resp = server.test(body={"n": 1})
+        assert resp == {"n": 2}
+    finally:
+        server.wait_for_completion()
+
+
+class MyModelSelector(ModelSelector):
+    def select(self, event, available_models: list[Model]) -> Optional[list[str]]:
+        return event.body.get("models")
+
+
+@pytest.mark.parametrize(
+    "execution_mechanism",
+    ("multiprocessing", "threading", "asyncio", "naive"),
+)
+def test_model_runner_with_selector(execution_mechanism: str):
+    m1 = MyModel(name="m1", inc=1)
+    m2 = MyModel(name="m2", inc=2)
+    # Normally, this is set at the class level, but for testing purposes, we set it on the instance
+    m2.execution_mechanism = execution_mechanism
+
+    function = mlrun.new_function("tests", kind="serving")
+    graph = function.set_topology("flow", engine="async")
+    model_runner_step = ModelRunnerStep(
+        name="my_model_runner",
+        model_selector="MyModelSelector",
+    )
+    model_runner_step.add_model(m1)
+    model_runner_step.add_model(m2)
+    graph.to(model_runner_step).respond()
+
+    server = function.to_mock_server()
+    try:
+        # both models
+        resp = server.test(body={"n": 1})
+        assert resp == {"m1": {"n": 2}, "m2": {"n": 3}}
+
+        # only m2
+        resp = server.test(body={"n": 1, "models": ["m2"]})
+        assert resp == {"m2": {"n": 3}}
+    finally:
+        server.wait_for_completion()

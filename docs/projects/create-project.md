@@ -6,13 +6,20 @@ A project is a container for all the assets, configuration, and code of a partic
 <p align="center"><img src="../_static/images/project.png" alt="mlrun-project" width="600"/></p><br>
 
 **In this section**
-- [Creating a new project](#create)
-- [Adding functions, artifacts, workflow, and config](#add-elements)
-- [Pushing the project content into git or an archive](#push)
-- [Get a project from DB or create it](#get-or-create)
+- [Creating a project](#creating-a-project)
+- [Adding functions, artifacts, workflow, and config](#adding-functions-artifacts-workflow-and-config)
+- [Pushing the project content into git or an archive](#pushing-the-project-content-into-git-or-an-archive)
+- [Get a project from DB or create it](#get-a-project-from-db-or-create-it)
+- [Deleting a project](#deleting-a-project)
+
+<a id="best-prac-projs"></a>
+## Best Practices
+
+Ensure that no project name is used as the prefix of another project name, since this would affect retrieving pipelines from Kubeflow pipelines.
+For example, do not name projects `my_project` and `my_project_sec`.
 
 <a id="create"></a>
-## Creating a new project
+## Creating a project
 
 Project files (code, configuration, etc.) are stored in a directory (the project `context` path) and can be pushed to, or loaded from, the source repository. See the following project directory example:
 
@@ -32,12 +39,17 @@ To define a new project from scratch, use {py:meth}`~mlrun.projects.new_project`
 The `context` dir holds the configuration, code, and workflow files. Its default value is "./", which is the directory 
 the MLRun client runs from. File paths in the project are relative to the context root.
 There are additional, optional parameters.
-The `user_project` flag indicates that the project name is unique per user, and the `init_git` flag is used to initialize git in the context dir.
+The `user_project=True` add the current username to the provided project name (making it unique per user). 
+(When the username is an email, it is trimmed after the '@'.)
+ The `init_git` flag is used to initialize git in the context dir.
+
 
 ```python
 import mlrun
-project = mlrun.new_project("myproj", "./", user_project=True, 
-                            init_git=True, description="my new project")
+
+project = mlrun.new_project(
+    "myproj", "./", user_project=True, init_git=True, description="my new project"
+)
 ```
  
 Projects can also be created from a template (yaml file, zip file, or git repo), allowing users to create reusable skeletons. 
@@ -47,16 +59,23 @@ Example of creating a new project from a zip template:
 
 ```python
 # create a project from zip, initialize a local git, and register the git remote path
-project = mlrun.new_project("myproj", "./", init_git=True, user_project=True,
-                            remote="git://github.com/myorg/some-project.git",
-                            from_template="http://mysite/proj.zip")
+project = mlrun.new_project(
+    "myproj",
+    "./",
+    init_git=True,
+    user_project=True,
+    remote="git://github.com/myorg/some-project.git",
+    from_template="http://mysite/proj.zip",
+)
 ```
+
+
 
 <a id="add-elements"></a>
 ## Adding functions, artifacts, workflow, and config
 
-Projects host [functions](../runtimes/functions.html), [workflows](../concepts/workflow-overview.html), [artifacts (files, datasets, models, etc.)](../store/artifacts.html), features, and configuration (parameters, [secrets](../secrets.html), source, etc.).
-This section explains how to add or register different project elements. For details on the feature store and its elements (sets, vectors) see the [**feature store documentation**](../feature-store/feature-store.html).
+Projects host [functions](../runtimes/functions.md), [workflows](../concepts/workflow-overview.md), [artifacts (files, datasets, models, etc.)](../store/artifacts.md), features, and configuration (parameters, [secrets](../secrets.md), source, etc.).
+This section explains how to add or register different project elements. For details on the feature store and its elements (sets, vectors) see the [**feature store documentation**](../feature-store/feature-store.md).
 
 **Adding and registering functions:**
 
@@ -66,51 +85,69 @@ Functions can be created from a single code/notebook file or have access to the 
 
 ```python
 # register a (single) python file as a function
-project.set_function('src/data_prep.py', 'data-prep', image='mlrun/mlrun', handler='prep', kind="job")
+project.set_function(
+    "src/data_prep.py", "data-prep", image="mlrun/mlrun", handler="prep", kind="job"
+)
 
-# register a notebook file as a function, specify custom image and extra requirements 
-project.set_function('src/mynb.ipynb', name='test-function', image="my-org/my-image",
-                      handler="run_test", requirements="requirements.txt", kind="job")
+# register a notebook file as a function, specify custom image and extra requirements
+project.set_function(
+    "src/mynb.ipynb",
+    name="test-function",
+    image="my-org/my-image",
+    handler="run_test",
+    requirements="requirements.txt",
+    kind="job",
+)
 
 # register a module.handler as a function (requires defining the default sources/work dir, if it's not root)
 project.spec.workdir = "src"
-project.set_function(name="train", handler="training.train",  image="mlrun/mlrun", kind="job", with_repo=True)
+project.set_function(
+    name="train",
+    handler="training.train",
+    image="mlrun/mlrun",
+    kind="job",
+    with_repo=True,
+)
 ```
 
-See details and examples on how to [**create and register functions**](../runtimes/create-and-use-functions.html), 
-how to [**annotate notebooks**](../runtimes/mlrun_code_annotations.html) (to be used as functions), how to [**run, build, or deploy**](./run-build-deploy.html) functions, and how to [**use them in workflows**](./build-run-workflows-pipelines.html). 
+See details and examples on how to [**create and register functions**](../runtimes/create-and-use-functions.ipynb), 
+how to [**annotate notebooks**](../runtimes/mlrun_code_annotations.ipynb) (to be used as functions), how to [**run, build, or deploy**](./run-build-deploy.md) functions, and how to [**use them in workflows**](./build-run-workflows-pipelines.md). 
 
 **Register artifacts:**
 
-[Artifacts](../store/artifacts.html) are used by functions and workflows and are referenced by a key (name) and optional tag (version).
+[Artifacts](../store/artifacts.md) are used by functions and workflows and are referenced by a key (name) and optional tag (version).
 Users can define artifact files or objects in the project spec, which are registered during project load or when calling `project.register_artifacts()`.
 To register artifacts use the {py:meth}`~mlrun.projects.MlrunProject.set_artifact`) method. See the examples:
 
 ```python
-# register a simple file artifact in the project (point to remote object)  
-data_url = 'https://s3.wasabisys.com/iguazio/data/iris/iris.data.raw.csv'
-project.set_artifact('data', target_path=data_url)
+# register a simple file artifact in the project (point to remote object)
+data_url = "https://s3.wasabisys.com/iguazio/data/iris/iris.data.raw.csv"
+project.set_artifact("data", target_path=data_url)
 
 # register a model artifact
-project.set_artifact('model', ModelArtifact(model_file="model.pkl"), target_path=model_dir_url)
+project.set_artifact(
+    "model", ModelArtifact(model_file="model.pkl"), target_path=model_dir_url
+)
 
 # register local or remote artifact object (yaml or zip), will be imported on project load
 # to generate such a package use `artifact.export(zip_path)`
-project.set_artifact('model', 'https://mystuff.com/models/mymodel.zip')
+project.set_artifact("model", "https://mystuff.com/models/mymodel.zip")
 ```
 
 ```{admonition} Note
 Local file paths are relative to the context dir.
 ```
 
+You can delete artifacts per project. See [Deleting artifacts](../store/artifacts.md#deleting-artifacts).
+
 **Registering workflows:**
 
 Projects contain one or more workflows (pipelines). The workflows can be registered using the {py:meth}`~mlrun.projects.set_workflow`) method.
-Project workflows are executed using the {py:meth}`~mlrun.projects.MlrunProject.run`) method. See [**building and running workflows**](./build-run-workflows-pipelines.html) for details.
+Project workflows are executed using the {py:meth}`~mlrun.projects.MlrunProject.run`) method. See [**building and running workflows**](./build-run-workflows-pipelines.md) for details.
 
 ```python
-# Add a multi-stage workflow (./myflow.py) to the project with the name 'main' and save the project 
-project.set_workflow('main', "./src/workflow.py")
+# Add a multi-stage workflow (./myflow.py) to the project with the name 'main' and save the project
+project.set_workflow("main", "./src/workflow.py")
 ```
 
 **Set project wide parameters and secrets:**
@@ -192,7 +229,7 @@ spec:
 ## Pushing the project content into git or an archive
 
 Project code, metadata, and configuration are stored and versioned in source control systems like GIT or archives (zip, tar).
-This allows [**loading an entire project**](./load-project.html) (with a specific version) into a development or production environment, or seamlessly [**integrating with CI/CD frameworks**](./ci-integration.html).
+This allows [**loading an entire project**](./load-project.md) (with a specific version) into a development or production environment, or seamlessly [**integrating with CI/CD frameworks**](./ci-integration.md).
 
 <p align="center"><img src="../_static/images/project-lifecycle.png" alt="project-lifecycle" width="700"/></p><br>
  
@@ -207,7 +244,7 @@ Use standard Git commands to push the current project tree into a git archive. M
     git commit -m "Commit message"
     git push origin master
 
-Alternatively you can use MLRun SDK calls:
+Alternatively, you can use MLRun SDK calls:
 - {py:meth}`~mlrun.projects.MlrunProject.create_remote` - to register the remote Git path
 - {py:meth}`~mlrun.projects.MlrunProject.push` - save project spec (`project.yaml`) and commit/push updates to remote repo
 
@@ -241,9 +278,17 @@ and run `get_or_create_project` to load changes made by others.
 Example:
 
 ```python
-    # load project from the DB (if exists) or the source repo
-    project = mlrun.get_or_create_project("myproj", "./", "git://github.com/mlrun/demo-xgb-project.git")
-    project.pull("development")  # pull the latest code from git
-    project.run("main", arguments={'data': data_url})  # run the workflow "main"
+# load project from the DB (if exists) or the source repo
+project = mlrun.get_or_create_project(
+    "myproj", "./", "git://github.com/mlrun/demo-xgb-project.git"
+)
+project.pull("development")  # pull the latest code from git
+project.run("main", arguments={"data": data_url})  # run the workflow "main"
 ```
 
+## Deleting a project
+
+See {py:class}`~mlrun.db.httpdb.HTTPRunDB.delete_project` 
+also deletes the project's objects (artifact metadata, runs, etc.), 
+but not the artifact data. (When deleting a project that has resources, you must use `deletion_strategy=mlrun.common.schemas.DeletionStrategy.cascade`, which deletes the objects.)
+After you delete a project, the only way to delete its artifact files is by browsing the storage where they are located and deleting the files. 

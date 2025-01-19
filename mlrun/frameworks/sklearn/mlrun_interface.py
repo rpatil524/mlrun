@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 from abc import ABC
-from typing import List
+from typing import Optional
 
 import mlrun
 
@@ -75,9 +75,7 @@ class SKLearnMLRunInterface(MLRunInterface, ABC):
             cls._REPLACED_METHODS.remove("predict_proba")
 
         # Add the interface to the model:
-        super(SKLearnMLRunInterface, cls).add_interface(
-            obj=obj, restoration=restoration
-        )
+        super().add_interface(obj=obj, restoration=restoration)
 
         # Restore the '_REPLACED_METHODS' list for next models:
         if "predict_proba" not in cls._REPLACED_METHODS:
@@ -100,7 +98,7 @@ class SKLearnMLRunInterface(MLRunInterface, ABC):
 
         def wrapper(
             self: SKLearnTypes.ModelType,
-            X: SKLearnTypes.DatasetType,
+            X: SKLearnTypes.DatasetType,  # noqa: N803 - should be lowercase "x", kept for BC
             y: SKLearnTypes.DatasetType = None,
             *args,
             **kwargs,
@@ -127,7 +125,12 @@ class SKLearnMLRunInterface(MLRunInterface, ABC):
 
         return wrapper
 
-    def mlrun_predict(self, X: SKLearnTypes.DatasetType, *args, **kwargs):
+    def mlrun_predict(
+        self,
+        X: SKLearnTypes.DatasetType,  # noqa: N803 - should be lowercase "x", kept for BC
+        *args,
+        **kwargs,
+    ):
         """
         MLRun's wrapper for the common ML API predict method.
         """
@@ -139,7 +142,12 @@ class SKLearnMLRunInterface(MLRunInterface, ABC):
 
         return y_pred
 
-    def mlrun_predict_proba(self, X: SKLearnTypes.DatasetType, *args, **kwargs):
+    def mlrun_predict_proba(
+        self,
+        X: SKLearnTypes.DatasetType,  # noqa: N803 - should be lowercase "x", kept for BC
+        *args,
+        **kwargs,
+    ):
         """
         MLRun's wrapper for the common ML API predict_proba method.
         """
@@ -154,8 +162,8 @@ class SKLearnMLRunInterface(MLRunInterface, ABC):
     def configure_logging(
         self,
         context: mlrun.MLClientCtx = None,
-        plans: List[MLPlan] = None,
-        metrics: List[Metric] = None,
+        plans: Optional[list[MLPlan]] = None,
+        metrics: Optional[list[Metric]] = None,
         x_test: SKLearnTypes.DatasetType = None,
         y_test: SKLearnTypes.DatasetType = None,
         model_handler: MLModelHandler = None,

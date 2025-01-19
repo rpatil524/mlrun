@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 from enum import Enum
-from typing import Dict, Union
+from typing import Optional, Union
 
 import mlrun.errors
 from mlrun.artifacts import Artifact, DatasetArtifact
@@ -49,8 +49,8 @@ class DatasetPlan(MLPlan):
     def __init__(
         self,
         purpose: Union[Purposes, str] = Purposes.OTHER,
-        name: str = None,
-        preview: int = None,
+        name: Optional[str] = None,
+        preview: Optional[int] = None,
         stats: bool = False,
         fmt: str = "parquet",
     ):
@@ -89,12 +89,10 @@ class DatasetPlan(MLPlan):
         self._preview = preview
         self._stats = stats
         self._fmt = fmt
-        self._plans = (
-            {}
-        )  # TODO: Implement DatasetPlansLibrary with dataset specific artifacts plans.
+        self._plans = {}  # TODO: Implement DatasetPlansLibrary with dataset specific artifacts plans.
 
         # Continue initializing the plan:
-        super(DatasetPlan, self).__init__(need_probabilities=False)
+        super().__init__(need_probabilities=False)
 
     def is_ready(self, stage: MLPlanStages, is_probabilities: bool) -> bool:
         """
@@ -126,7 +124,7 @@ class DatasetPlan(MLPlan):
         y: MLTypes.DatasetType = None,
         target_columns_names: MLTypes.TargetColumnsNamesType = None,
         **kwargs,
-    ) -> Dict[str, Artifact]:
+    ) -> dict[str, Artifact]:
         """
         Produce the dataset artifact according to this plan.
 

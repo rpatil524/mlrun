@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 from abc import ABC, abstractmethod
-from typing import Tuple, Union
+from typing import Optional, Union
 
 from sklearn.datasets import (
     make_classification,
@@ -30,7 +30,9 @@ class MLFunctions(ABC):
     @staticmethod
     @abstractmethod
     def train(
-        context: mlrun.MLClientCtx, algorithm_functionality: str, model_name: str = None
+        context: mlrun.MLClientCtx,
+        algorithm_functionality: str,
+        model_name: Optional[str] = None,
     ):
         pass
 
@@ -50,8 +52,8 @@ class MLFunctions(ABC):
     def get_dataset(
         algorithm_functionality: AlgorithmFunctionality, for_training: bool
     ) -> Union[
-        Tuple[MLTypes.DatasetType, MLTypes.DatasetType],
-        Tuple[
+        tuple[MLTypes.DatasetType, MLTypes.DatasetType],
+        tuple[
             MLTypes.DatasetType,
             MLTypes.DatasetType,
             MLTypes.DatasetType,

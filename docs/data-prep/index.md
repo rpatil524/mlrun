@@ -13,7 +13,8 @@ not needed, in which cases MLRun provides a set of utilities to facilitate data 
 
 ingesting_data
 logging_datasets
-../runtimes/spark-operator
 ingest-data-fs
 ../feature-store/using-spark-engine
 ```
+
+See also {ref}`ci-cd-automate`.

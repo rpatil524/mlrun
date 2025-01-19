@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,8 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# flake8: noqa  - this is until we take care of the F401 violations with respect to __all__ & sphinx
 
 __all__ = [
     "DataItem",
@@ -29,14 +27,27 @@ __all__ = [
     "StreamSource",
     "KafkaSource",
     "RedisStore",
+    "DatabricksFileSystemDisableCache",
+    "DatabricksFileBugFixed",
+    "get_stream_pusher",
+    "ConfigProfile",
+    "VectorStoreCollection",
 ]
 
-import mlrun.datastore.wasbfs
+import fsspec
 
-from ..platforms.iguazio import KafkaOutputStream, OutputStream, parse_path
+import mlrun.datastore.wasbfs
+from mlrun.platforms.iguazio import (
+    HTTPOutputStream,
+    KafkaOutputStream,
+    OutputStream,
+    parse_path,
+)
+
 from ..utils import logger
 from .base import DataItem
 from .datastore import StoreManager, in_memory_store, uri_to_ipython
+from .dbfs_store import DatabricksFileBugFixed, DatabricksFileSystemDisableCache
 from .s3 import parse_s3_bucket_and_key
 from .sources import (
     BigQuerySource,
@@ -53,9 +64,25 @@ from .store_resources import (
     parse_store_uri,
 )
 from .targets import CSVTarget, NoSqlTarget, ParquetTarget, StreamTarget
-from .utils import parse_kafka_url
+from .utils import get_kafka_brokers_from_dict, parse_kafka_url
 
 store_manager = StoreManager()
+
+if hasattr(fsspec, "register_implementation"):
+    fsspec.register_implementation(
+        "dbfs", DatabricksFileSystemDisableCache, clobber=True
+    )
+else:
+    from fsspec.registry import known_implementations
+
+    known_implementations["dbfs"] = {
+        "class": "mlrun.datastore.dbfs_store.DatabricksFileSystemDisableCache",
+        "err": "Please make sure your fsspec version supports dbfs",
+    }
+
+    del known_implementations
+
+del fsspec  # clear the module namespace
 
 
 def set_in_memory_item(key, value):
@@ -69,7 +96,7 @@ def get_in_memory_items():
 
 
 def get_stream_pusher(stream_path: str, **kwargs):
-    """get a stream pusher object from URL, currently only support v3io stream
+    """get a stream pusher object from URL.
 
     common kwargs::
 
@@ -80,17 +107,17 @@ def get_stream_pusher(stream_path: str, **kwargs):
     :param stream_path:        path/url of stream
     """
 
-    if stream_path.startswith("kafka://") or "kafka_bootstrap_servers" in kwargs:
-        topic, bootstrap_servers = parse_kafka_url(
-            stream_path, kwargs.get("kafka_bootstrap_servers")
-        )
-        return KafkaOutputStream(
-            topic, bootstrap_servers, kwargs.get("kafka_producer_options")
-        )
+    kafka_brokers = get_kafka_brokers_from_dict(kwargs)
+    if stream_path.startswith("kafka://") or kafka_brokers:
+        topic, brokers = parse_kafka_url(stream_path, kafka_brokers)
+        return KafkaOutputStream(topic, brokers, kwargs.get("kafka_producer_options"))
+    elif stream_path.startswith("http://") or stream_path.startswith("https://"):
+        return HTTPOutputStream(stream_path=stream_path)
     elif "://" not in stream_path:
         return OutputStream(stream_path, **kwargs)
     elif stream_path.startswith("v3io"):
         endpoint, stream_path = parse_path(stream_path)
+        endpoint = kwargs.pop("endpoint", None) or endpoint
         return OutputStream(stream_path, endpoint=endpoint, **kwargs)
     elif stream_path.startswith("dummy://"):
         return _DummyStream(**kwargs)
@@ -104,9 +131,9 @@ class _DummyStream:
     def __init__(self, event_list=None, **kwargs):
         self.event_list = event_list or []
 
-    def push(self, data):
+    def push(self, data, **kwargs):
         if not isinstance(data, list):
             data = [data]
         for item in data:
-            logger.info(f"dummy stream got event: {item}")
+            logger.info(f"dummy stream got event: {item}, kwargs={kwargs}")
             self.event_list.append(item)

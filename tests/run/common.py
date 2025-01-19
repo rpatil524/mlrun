@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ def my_func(context, p1=1, p2="a-string", input_name="infile.txt"):
     context.log_result("accuracy", p1 * 2)
     context.logger.info("some info")
     context.logger.debug("debug info")
-    context.log_metric("loss", 7)
     context.log_artifact("chart", body="abc")
 
     raw_data = {

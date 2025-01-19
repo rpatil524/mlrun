@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,4 +18,3 @@ from .clones import get_git_username_password_from_token  # noqa
 from .helpers import *  # noqa
 from .http import *  # noqa
 from .logger import *  # noqa
-from .vault import *  # noqa

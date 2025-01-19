@@ -24,8 +24,9 @@ Common context methods:
 Example function and usage of the context object:
  
 ```python
-from mlrun.artifacts import ChartArtifact
+from mlrun.artifacts import PlotlyArtifact
 import pandas as pd
+
 
 def my_job(context, p1=1, p2="x"):
     # load MLRUN runtime context (will be set by the runtime framework)
@@ -56,13 +57,13 @@ def my_job(context, p1=1, p2="x"):
         "html_result", body=b"<b> Some HTML <b>", local_path="result.html"
     )
 
-    # create a chart output (will show in the pipelines UI)
-    chart = ChartArtifact("chart")
-    chart.labels = {"type": "roc"}
-    chart.header = ["Epoch", "Accuracy", "Loss"]
-    for i in range(1, 8):
-        chart.add_row([i, i / 20 + 0.75, 0.30 - i / 20])
-    context.log_artifact(chart)
+    # create a plotly output (will show in the pipelines UI)
+    x = np.arange(10)
+    fig = go.Figure(data=go.Scatter(x=x, y=x**2))
+
+    # Create a PlotlyArtifact using the figure and log it
+    plotly_artifact = PlotlyArtifact(figure=fig, key="plotly")
+    context.log_artifact(plotly_artifact)
 
     raw_data = {
         "first_name": ["Jason", "Molly", "Tina", "Jake", "Amy"],
@@ -78,23 +79,17 @@ Example of creating the context objects from the environment:
 
 ```python
 if __name__ == "__main__":
-    context = mlrun.get_or_create_ctx('train')
-    p1 = context.get_param('p1', 1)
-    p2 = context.get_param('p2', 'a-string')
+    context = mlrun.get_or_create_ctx("train")
+    p1 = context.get_param("p1", 1)
+    p2 = context.get_param("p2", "a-string")
     # do something
     context.log_result("accuracy", p1 * 2)
-    # commit the tracking results to the DB (and mark as completed)
-    context.commit(completed=True)
 ```
 
-Note that MLRun context is also a python context and can be used in a `with` statement (eliminating the need for `commit`).
-
-```python
-if __name__ == "__main__":
-    with mlrun.get_or_create_ctx('train') as context:
-        p1 = context.get_param('p1', 1)
-        p2 = context.get_param('p2', 'a-string')
-        # do something
-        context.log_result("accuracy", p1 * 2)
+```{admonition} Note
+The context object is expected to be used as part of a run. If you are looking for a similar API to use on 
+your local environment (outside a local run) you can use the {py:meth}`~mlrun.projects.MlrunProject` object.
 ```
+
+> Note: The context object is expected to be used as part of a run. If you are looking for a similar API to use on your local environment (outside a local run) you can use the '~mlrun.projects.MLRunProject' object. 
 

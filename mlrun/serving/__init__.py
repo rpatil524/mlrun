@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,10 +21,26 @@ __all__ = [
     "TaskStep",
     "RouterStep",
     "QueueStep",
+    "ErrorStep",
+    "MonitoringApplicationStep",
+    "ModelRunnerStep",
+    "ModelRunner",
+    "Model",
+    "ModelSelector",
 ]
 
 from .routers import ModelRouter, VotingEnsemble  # noqa
 from .server import GraphContext, GraphServer, create_graph_server  # noqa
-from .states import QueueStep, RouterStep, TaskStep  # noqa
+from .states import (
+    ErrorStep,
+    QueueStep,
+    RouterStep,
+    TaskStep,
+    MonitoringApplicationStep,
+    ModelRunnerStep,
+    ModelRunner,
+    Model,
+    ModelSelector,
+)  # noqa
 from .v1_serving import MLModelServer, new_v1_model_server  # noqa
 from .v2_serving import V2ModelServer  # noqa

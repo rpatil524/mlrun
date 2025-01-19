@@ -1,23 +1,22 @@
 blosc~=1.7
 dask-kubernetes~=0.11.0
-dask-ml~=1.4,<1.9.0
-dask[complete]~=2021.11.2
-lz4~=3.0
+# dask 2023 does not work on python 3.11
+# dask 2024 requires dependencies that current mlrun with 3.9 cannot support
+dask-ml~=1.4,<1.9.0; python_version < "3.11"
+dask[complete]~=2023.12.1; python_version < "3.11"
+dask-ml~=2024.4.4; python_version >= "3.11"
+dask[complete]~=2024.12.1; python_version >= "3.11"
 vaex~=4.0
 yellowbrick~=1.1
 lifelines~=0.25.0
-# plotly artifact body in 5.12.0 may contain chars that are not encodable in 'latin-1' encoding
-# so, it cannot be logged as artifact (raised UnicodeEncode error - ML-3255)
-plotly~=5.4, <5.12.0
+plotly~=5.23
 pyod~=0.8.1
-pytest~=6.0
-scikit-multiflow~=0.5.3
 scikit-optimize~=0.8.1
-scikit-image~=0.16.0
+scikit-image~=0.24.0
 numexpr~=2.6
 sympy~=1.5
-pymysql~=1.0
-lightgbm~=3.0
+pymysql~=1.1
+lightgbm~=4.3
 graphviz~=0.20.0
 opencv-python-headless~=4.0
 pyhive @ git+https://github.com/v3io/PyHive.git@v0.6.999

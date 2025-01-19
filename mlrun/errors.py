@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,9 +29,12 @@ class MLRunBaseError(Exception):
     pass
 
 
-class MLRunTaskNotReady(MLRunBaseError):
+class MLRunTaskNotReadyError(MLRunBaseError):
     """indicate we are trying to read a value which is not ready
     or need to come from a job which is in progress"""
+
+
+MLRunTaskNotReady = MLRunTaskNotReadyError  # kept for BC only
 
 
 class MLRunHTTPError(MLRunBaseError, requests.HTTPError):
@@ -44,7 +47,6 @@ class MLRunHTTPError(MLRunBaseError, requests.HTTPError):
         status_code: typing.Optional[int] = None,
         **kwargs,
     ):
-
         # because response object is probably with an error, it returns False, so we
         # should use 'is None' specifically
         if response is None:
@@ -74,7 +76,7 @@ class MLRunHTTPStatusError(MLRunHTTPError):
     error_status_code = None
 
     def __init__(self, *args, response: requests.Response = None, **kwargs):
-        super(MLRunHTTPStatusError, self).__init__(
+        super().__init__(
             *args, response=response, status_code=self.error_status_code, **kwargs
         )
 
@@ -84,7 +86,7 @@ def raise_for_status(
         requests.Response,
         aiohttp.ClientResponse,
     ],
-    message: str = None,
+    message: typing.Optional[str] = None,
 ):
     """
     Raise a specific MLRunSDK error depending on the given response status code.
@@ -93,9 +95,7 @@ def raise_for_status(
     try:
         response.raise_for_status()
     except (requests.HTTPError, aiohttp.ClientResponseError) as exc:
-        error_message = err_to_str(exc)
-        if message:
-            error_message = f"{error_message}: {message}"
+        error_message = err_to_str(exc) if not message else message
         status_code = (
             response.status_code
             if hasattr(response, "status_code")
@@ -107,15 +107,20 @@ def raise_for_status(
             raise MLRunHTTPError(error_message, response=response) from exc
 
 
-def raise_for_status_code(status_code: int, message: str = None):
+def err_for_status_code(status_code: int, message: typing.Optional[str] = None):
     """
-    Raise a specific MLRunSDK error depending on the given response status code.
-    If no specific error exists, raises an MLRunHTTPError
+    Return a specific MLRunSDK error depending on the given response status code.
+    If no specific error exists, returns an MLRunHTTPError.
+    Usage example:
+    >>> try:
+    >>>     ...
+    >>> except ExcWithStatusCode as exc:
+    >>>     raise err_for_status_code(exc.status_code, exc.message) from exc
     """
     try:
-        raise STATUS_ERRORS[status_code](message)
+        return STATUS_ERRORS[int(status_code)](message)
     except KeyError:
-        raise MLRunHTTPError(message)
+        return MLRunHTTPError(message)
 
 
 def err_to_str(err):
@@ -135,7 +140,13 @@ def err_to_str(err):
         error_strings.append(err_msg)
         err = err.__cause__
 
-    return ", caused by: ".join(error_strings)
+    err_msg = ", caused by: ".join(error_strings)
+
+    # in case the error string is longer than 32k, we truncate it
+    # the truncation takes the first 16k, then the last 16k characters
+    if len(err_msg) > 32_000:
+        err_msg = err_msg[:16_000] + "...truncated..." + err_msg[-16_000:]
+    return err_msg
 
 
 # Specific Errors
@@ -151,11 +162,19 @@ class MLRunNotFoundError(MLRunHTTPStatusError):
     error_status_code = HTTPStatus.NOT_FOUND.value
 
 
+class MLRunPaginationEndOfResultsError(MLRunNotFoundError):
+    pass
+
+
 class MLRunBadRequestError(MLRunHTTPStatusError):
     error_status_code = HTTPStatus.BAD_REQUEST.value
 
 
 class MLRunInvalidArgumentError(MLRunHTTPStatusError, ValueError):
+    error_status_code = HTTPStatus.BAD_REQUEST.value
+
+
+class MLRunModelLimitExceededError(MLRunHTTPStatusError, ValueError):
     error_status_code = HTTPStatus.BAD_REQUEST.value
 
 
@@ -179,6 +198,10 @@ class MLRunInternalServerError(MLRunHTTPStatusError):
     error_status_code = HTTPStatus.INTERNAL_SERVER_ERROR.value
 
 
+class MLRunNotImplementedServerError(MLRunHTTPStatusError):
+    error_status_code = HTTPStatus.NOT_IMPLEMENTED.value
+
+
 class MLRunServiceUnavailableError(MLRunHTTPStatusError):
     error_status_code = HTTPStatus.SERVICE_UNAVAILABLE.value
 
@@ -193,6 +216,30 @@ class MLRunMissingDependencyError(MLRunInternalServerError):
 
 class MLRunTimeoutError(MLRunHTTPStatusError, TimeoutError):
     error_status_code = HTTPStatus.GATEWAY_TIMEOUT.value
+
+
+class MLRunInvalidMMStoreTypeError(MLRunHTTPStatusError, ValueError):
+    error_status_code = HTTPStatus.BAD_REQUEST.value
+
+
+class MLRunStreamConnectionFailureError(MLRunHTTPStatusError, ValueError):
+    error_status_code = HTTPStatus.BAD_REQUEST.value
+
+
+class MLRunTSDBConnectionFailureError(MLRunHTTPStatusError, ValueError):
+    error_status_code = HTTPStatus.BAD_REQUEST.value
+
+
+class MLRunRetryExhaustedError(Exception):
+    pass
+
+
+class MLRunTaskCancelledError(Exception):
+    pass
+
+
+class MLRunValueError(ValueError):
+    pass
 
 
 class MLRunFatalFailureError(Exception):
@@ -218,4 +265,7 @@ STATUS_ERRORS = {
     HTTPStatus.PRECONDITION_FAILED.value: MLRunPreconditionFailedError,
     HTTPStatus.INTERNAL_SERVER_ERROR.value: MLRunInternalServerError,
     HTTPStatus.SERVICE_UNAVAILABLE.value: MLRunServiceUnavailableError,
+    HTTPStatus.NOT_IMPLEMENTED.value: MLRunNotImplementedServerError,
 }
+
+EXPECTED_ERRORS = (MLRunPaginationEndOfResultsError,)

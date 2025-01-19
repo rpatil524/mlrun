@@ -3,21 +3,20 @@
 
 ML applications require you to implement the following stages in a scalable and reproducible way:
 
-1. [Ingest and process data](#ingest)
-2. [Develop and train models](#develop)
-2. [Deploy models and applications](#deploy)
-2. [Monitor and alert](#monitor)
+1. [Ingest and process data](#ingest-and-process-data)
+2. [Develop and train models](#develop-and-train-models)
+2. [Deploy models and applications](#deploy-models-and-applications)
+2. [Monitor and alert](#monitor-and-alert)
 
 MLRun automates the MLOps work. It simplifies & accelerates the time to production
 
-<a id="ingest"></a>
 ## Ingest and process data
 
 There is no ML without data. Before everything else, ML teams need access to historical and/or online data from multiple sources, and they 
 must catalog and organize the data in a way that allows for simple and fast analysis (for example, by storing data in columnar data 
 structures, such as Parquet).
 
-In most cases, the raw data cannot be used as-is for machine learning algorithms for various reasons such as:
+In most cases, the raw data cannot be used "as-is" for machine learning algorithms for various reasons, such as:
 
 - The data is low quality (missing fields, null values, etc.) and requires cleaning and imputing.
 - The data needs to be converted to numerical or categorical values which can be processed by algorithms.
@@ -33,12 +32,11 @@ audio, and visual data into machine learning- or deep learning-friendly data org
 
 <img src="_static/images/data-collect-and-prep.png" alt="data-collection-and-preparation" width="800" /><br>
 
-MLOps solutions should incorporate a [feature store](./feature-store/feature-store.html) that defines the data collection and transformations 
+MLOps solutions should incorporate a [feature store](./feature-store/feature-store.md) that defines the data collection and transformations 
 just once for both batch and real-time scenarios, processes features automatically without manual involvement, and serves the features from 
 a shared catalog to training, serving, and data governance applications. Feature stores must also extend beyond traditional analytics and 
 enable advanced transformations on unstructured data and complex layouts.
 
-<a id="develop"></a>
 ## Develop and train models
 Whether it’s deep learning or machine learning, MLRun allows you to train your models at scale and capture all the relevant metadata for experiments tracking and lineage. 
 
@@ -47,7 +45,7 @@ using different parameter sets or algorithms, evaluate models, and run various m
 data, metadata, code and results must be versioned and logged, providing quick results visualization, to compare them with past results and 
 understand which data was used to produce each model.
 
-Pipelines can be more complex—for example, when ML teams need to develop a combination of models, or use Deep Learning or NLP.
+Pipelines can be more complex, for example, when ML teams need to develop a combination of models, or use deep learning or NLP.
 
 <img src="_static/images/model-dev.png" alt="training" width="800" /><br>
 
@@ -72,10 +70,9 @@ jobs complete faster, and computation resources are freed up once they complete,
 The resulting models are stored in a versioned model repository along with metadata, performance metrics, required parameters, statistical 
 information, etc. Models can be loaded later into batch or real-time serving micro-services or functions.
 
-<a id="deploy"></a>
 ## Deploy models and applications
-With MLRun, in addition to a batch inference, you can deploy a robust and scalable {ref}`real-time pipeline <serving-graph>` for more complex and online scenarios. 
-MLRun uses Nuclio, an open source serverless framework for creating real-time pipelines for {ref}`model deployment <deployment>`.
+With MLRun, in addition to a batch inference, you can deploy a robust and scalable {ref}`real-time serving pipeline <serving-graph>` for more complex and online scenarios. 
+MLRun uses [Nuclio](https://nuclio.io/), an open source serverless framework for creating real-time pipelines for {ref}`model deployment <deployment>`.
 
 Once an ML model has been built, it needs to be integrated with real-world data and the business application or front-end services. The 
 entire application, or parts thereof, need to be deployed without disrupting the service. Deployment can be extremely challenging if the ML 
@@ -86,7 +83,7 @@ Production pipelines usually consist of:
 - Real-time data collection, validation, and feature engineering logic
 - One or more model serving services
 - API services and/or application integration logic
-- Data and model monitoring services
+- Data and {ref}`model-monitoring-overview` services
 - Resource monitoring and alerting services
 - Event, telemetry, and data/features logging services
 
@@ -115,15 +112,13 @@ Production pipeline development and deployment flow:
 2. Retrain models and re-engineer data when needed
 2. Upgrade pipeline components (non-disruptively) when needed
 
-<a id="monitor"></a>
 ## Monitor and alert
 
-Once the model is deployed, use MLRun to track the [operational statistics](./monitoring/model-monitoring-deployment.html#architecture) as well as [identify drift](./monitoring/model-monitoring-deployment.html#drift-analysis).
-When drift is identified, MLRun can trigger the training pipeline to train a new model.
-
 AI services and applications are becoming an essential part of any business. This trend brings with it liabilities, which drive further 
-complexity. ML teams need to add data, code and experiment tracking, monitor data to detect quality problems, and [monitor models](./monitoring/index.html) to detect concept drift and improve model accuracy through the use of AutoML techniques and ensembles, and so on.
+complexity. ML teams need to add data, code, and experiment tracking, and to monitor data to detect quality problems, and monitor models to detect 
+concept drift and improve model accuracy through the use of AutoML techniques and ensembles, and so on.
 
 Nothing lasts forever, not even carefully constructed models that have been trained using mountains of well-labeled data. ML teams need to 
-react quickly to adapt to constantly changing patterns in real-world data. Monitoring machine learning models is a core component of MLOps 
-to keep deployed models current and predicting with the utmost accuracy, and to ensure they deliver value long-term.
+react quickly to adapt to constantly changing patterns in real-world data. {ref}`model-monitoring-overview` is a core component of MLRun 
+to keep deployed models current and predicting with the utmost accuracy, and to ensure they deliver value long-term. Use {ref}`alerts` to inform you 
+about possible drift, performance issues, and other problem situations. And use {ref}`notifications` to inform  you or the system of the status of runs and pipelines.

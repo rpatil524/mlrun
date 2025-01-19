@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -70,18 +70,25 @@ def test_remote_step(httpserver, engine):
         {"post": "ok"}
     )
     url = httpserver.url_for("/")
-
     for params, request, expected in tests_map:
-        print(f"test params: {params}")
+        print(f"test params: {params}, request: {request}, expected: {expected}")
         server = _new_server(url, engine, **params)
-        resp = server.test(**request)
-        server.wait_for_completion()
+        try:
+            resp = server.test(**request)
+        except Exception as e:
+            raise e
+        finally:
+            server.wait_for_completion()
         assert resp == expected
 
     # test with url generated with expression (from the event)
     server = _new_server(None, engine, method="GET", url_expression="event['myurl']")
-    resp = server.test(body={"myurl": httpserver.url_for("/foo")})
-    server.wait_for_completion()
+    try:
+        resp = server.test(body={"myurl": httpserver.url_for("/foo")})
+    except Exception as e:
+        raise e
+    finally:
+        server.wait_for_completion()
     assert resp == {"foo": "ok"}
 
 
@@ -106,8 +113,12 @@ def test_remote_step_bad_status_code(httpserver, engine):
     for params, request, expected in tests_map:
         print(f"test params: {params}")
         server = _new_server(url, engine, **params)
-        resp = server.test(**request)
-        server.wait_for_completion()
+        try:
+            resp = server.test(**request)
+        except Exception as e:
+            raise e
+        finally:
+            server.wait_for_completion()
         assert resp == expected
 
     # test with url generated with expression (from the event)
@@ -136,8 +147,12 @@ def test_remote_class(httpserver, engine):
     ).to(name="s3", handler="echo").respond()
 
     server = function.to_mock_server()
-    resp = server.test(body={"req": {"x": 5}})
-    server.wait_for_completion()
+    try:
+        resp = server.test(body={"req": {"x": 5}})
+    except Exception as e:
+        raise e
+    finally:
+        server.wait_for_completion()
     assert resp == {"req": {"x": 5}, "resp": {"cat": "ok"}}
 
 
@@ -219,15 +234,30 @@ def test_remote_advance(httpserver, engine):
             url=httpserver.url_for("/"),
             url_expression="endpoint + event['url']",
             body_expression="event['data']",
+            headers_expression="event['body_headers']",
             input_path="req",
             result_path="resp",
         )
-    ).to(name="s3", handler="echo").respond()
+    ).to(name="s3", handler="echo", full_event=True).respond()
 
     server = function.to_mock_server()
-    resp = server.test(body={"req": {"url": "/dog", "data": {"x": 5}}})
-    server.wait_for_completion()
+    try:
+        resp = server.test(
+            body={
+                "req": {
+                    "url": "/dog",
+                    "data": {"x": 5},
+                    "body_headers": {"Test-header": "true"},
+                }
+            }
+        )
+    except Exception as e:
+        raise e
+    finally:
+        server.wait_for_completion()
+    resp_headers = resp["req"].pop("body_headers")
     assert resp == {"req": {"url": "/dog", "data": {"x": 5}}, "resp": {"post": "ok"}}
+    assert resp_headers["Test-header"] == "true"
 
 
 def _timed_out_handler(request: Request):

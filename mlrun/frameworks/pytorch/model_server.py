@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Any, Dict, List, Type, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -35,17 +35,21 @@ class PyTorchModelServer(V2ModelServer):
     def __init__(
         self,
         context: mlrun.MLClientCtx = None,
-        name: str = None,
+        name: Optional[str] = None,
         model: Module = None,
-        model_path: str = None,
-        model_name: str = None,
-        model_class: Union[Type[Module], str] = None,
-        modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-        custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-        custom_objects_directory: str = None,
+        model_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+        model_class: Optional[Union[type[Module], str]] = None,
+        modules_map: Optional[
+            Union[dict[str, Union[None, str, list[str]]], str]
+        ] = None,
+        custom_objects_map: Optional[
+            Union[dict[str, Union[str, list[str]]], str]
+        ] = None,
+        custom_objects_directory: Optional[str] = None,
         use_cuda: bool = True,
         to_list: bool = False,
-        protocol: str = None,
+        protocol: Optional[str] = None,
         **class_args,
     ):
         """
@@ -106,7 +110,7 @@ class PyTorchModelServer(V2ModelServer):
         :param protocol:                 -
         :param class_args:               -
         """
-        super(PyTorchModelServer, self).__init__(
+        super().__init__(
             context=context,
             name=name,
             model_path=model_path,
@@ -158,7 +162,7 @@ class PyTorchModelServer(V2ModelServer):
             model=self._model_handler.model, context=self.context
         )
 
-    def predict(self, request: Dict[str, Any]) -> Union[Tensor, list]:
+    def predict(self, request: dict[str, Any]) -> Union[Tensor, list]:
         """
         Infer the inputs through the model using MLRun's PyTorch interface and return its output. The inferred data will
         be read from the "inputs" key of the request.
@@ -183,7 +187,7 @@ class PyTorchModelServer(V2ModelServer):
         # Return as list if required:
         return predictions if not self.to_list else predictions.tolist()
 
-    def explain(self, request: Dict[str, Any]) -> str:
+    def explain(self, request: dict[str, Any]) -> str:
         """
         Return a string explaining what model is being serve in this serving function and the function name.
 

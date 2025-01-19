@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,16 +14,14 @@
 #
 import pathlib
 import sys
+from contextlib import nullcontext as does_not_raise
 
 import pytest
 from deepdiff import DeepDiff
 
 import mlrun
+import mlrun.errors
 from mlrun import code_to_function
-from mlrun.runtimes.function import (
-    _resolve_nuclio_runtime_python_image,
-    _resolve_work_dir_and_handler,
-)
 from mlrun.utils.helpers import resolve_git_reference_from_source
 from tests.runtimes.test_base import TestAutoMount
 
@@ -142,51 +140,32 @@ def test_v3io_stream_trigger():
         name="mystream",
         extra_attributes={"yy": "123"},
         ack_window_size=10,
-        access_key="x",
     )
-
-    print(function.spec.config)
     trigger = function.spec.config["spec.triggers.mystream"]
     assert trigger["attributes"]["containerName"] == "projects"
     assert trigger["attributes"]["streamPath"] == "x/y"
-    assert trigger["password"] == "x"
+    assert trigger["password"] == mlrun.model.Credentials.generate_access_key
     assert trigger["attributes"]["yy"] == "123"
     assert trigger["attributes"]["ackWindowSize"] == 10
 
 
-def test_resolve_work_dir_and_handler():
-    cases = [
-        (None, ("", "main:handler")),
-        ("x", ("", "x:handler")),
-        ("x:y", ("", "x:y")),
-        ("dir#", ("dir", "main:handler")),
-        ("dir#x", ("dir", "x:handler")),
-        ("dir#x:y", ("dir", "x:y")),
-    ]
-    for handler, expected in cases:
-        assert expected == _resolve_work_dir_and_handler(handler)
-
-
 @pytest.mark.parametrize(
-    "mlrun_client_version,python_version,expected_runtime",
+    "consumer_group,expected",
     [
-        ("1.3.0", "3.9.16", "python:3.9"),
-        ("1.3.0", "3.7.16", "python:3.7"),
-        (None, None, "python:3.7"),
-        (None, "3.9.16", "python:3.7"),
-        ("1.3.0", None, "python:3.7"),
-        ("0.0.0-unstable", "3.9.16", "python:3.9"),
-        ("0.0.0-unstable", "3.7.16", "python:3.7"),
-        ("1.2.0", "3.9.16", "python:3.7"),
-        ("1.2.0", "3.7.16", "python:3.7"),
+        ("my_group", does_not_raise()),
+        ("_mygroup", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
     ],
 )
-def test_resolve_nuclio_runtime_python_image(
-    mlrun_client_version, python_version, expected_runtime
-):
-    assert expected_runtime == _resolve_nuclio_runtime_python_image(
-        mlrun_client_version, python_version
-    )
+def test_v3io_stream_trigger_validate_consumer_group(consumer_group, expected):
+    function: mlrun.runtimes.RemoteRuntime = mlrun.new_function("tst", kind="nuclio")
+    with expected:
+        function.add_v3io_stream_trigger(
+            "v3io:///projects/x/y",
+            name="mystream",
+            group=consumer_group,
+        )
+        trigger = function.spec.config["spec.triggers.mystream"]
+        assert trigger["attributes"]["consumerGroup"] == consumer_group
 
 
 def test_resolve_git_reference_from_source():
@@ -224,3 +203,66 @@ def test_update_credentials_from_remote_build(function_kind):
 
     assert function.metadata.credentials.access_key == secret_name
     assert function.spec.env == remote_data["spec"]["env"]
+
+
+@pytest.mark.parametrize(
+    "tag,expected",
+    [
+        ("valid_tag", does_not_raise()),
+        ("invalid%$tag", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+        ("too-long-tag" * 10, pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+    ],
+)
+def test_invalid_tags(tag, expected, rundb_mock):
+    function = mlrun.new_function("test", kind="nuclio", tag=tag)
+    with expected:
+        function.pre_deploy_validation()
+
+
+@pytest.mark.parametrize(
+    "command, args, expected_sidecars",
+    (
+        [
+            None,
+            ["a", "b"],
+            [
+                {
+                    "name": "tst-sidecar",
+                    "ports": [
+                        {
+                            "containerPort": None,
+                            "name": "tst-sidecar-0",
+                            "protocol": "TCP",
+                        }
+                    ],
+                }
+            ],
+        ],
+        [
+            "abc",
+            ["a", "b"],
+            [
+                {
+                    "args": ["a", "b"],
+                    "command": ["abc"],
+                    "name": "tst-sidecar",
+                    "ports": [
+                        {
+                            "containerPort": None,
+                            "name": "tst-sidecar-0",
+                            "protocol": "TCP",
+                        }
+                    ],
+                }
+            ],
+        ],
+    ),
+)
+def test_with_sidecar(command: str, args: list, expected_sidecars: list):
+    function: mlrun.runtimes.RemoteRuntime = mlrun.new_function("tst", kind="nuclio")
+    function.with_sidecar(
+        command=command,
+        args=args,
+    )
+
+    assert function.spec.config["spec.sidecars"] == expected_sidecars

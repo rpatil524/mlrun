@@ -8,29 +8,48 @@
 # in setup.py so that we'll be able to copy and install this in the layer with all other requirements making the last
 # layer (which is most commonly being re-built) as thin as possible
 # we have a test test_extras_requirement_file_aligned to verify this file is aligned to setup.py
-boto3~=1.9, <1.17.107
-botocore>=1.20.106,<1.20.107
-aiobotocore~=1.4.0
-s3fs~=2021.8.1
+# The versions of gcsfs and s3fs should be identical to the fsspec version;
+# Therefore, they must be equal to each other.
+s3fs>=2023.9.2, <2024.7
+gcsfs>=2023.9.2, <2024.7
+ossfs==2023.12.0
+boto3>=1.28.0,<1.36
+oss2==2.18.1
+aiobotocore>=2.5.0,<2.16
 # https://github.com/Azure/azure-sdk-for-python/issues/24765#issuecomment-1150310498
 msrest~=0.6.21
 azure-core~=1.24
-azure-storage-blob~=12.13
-adlfs~=2021.8.1
+# This version is required in order to support the self._strip_protocol
+# function in Azure Blob File System functions (such as _ls and more).
+adlfs==2023.9.0
 azure-identity~=1.5
 azure-keyvault-secrets~=4.2
 # cryptography>=39, which is required by azure, needs this, or else we get
 # AttributeError: module 'lib' has no attribute 'OpenSSL_add_all_algorithms' (ML-3471)
 pyopenssl>=23
-bokeh~=2.4, >=2.4.2
-gcsfs~=2021.8.1
-# plotly artifact body in 5.12.0 may contain chars that are not encodable in 'latin-1' encoding
-# so, it cannot be logged as artifact (raised UnicodeEncode error - ML-3255)
-plotly~=5.4, <5.12.0
-# To support python 11, google-cloud-bigquery requires grpcio>=1.49.1, which is incompatible with the grpcio version
-# required by frames (because it upgrades protobuf from 3.x to 4.x, breaking binary compatibility)
-google-cloud-bigquery[pandas, bqstorage]~=3.2
+plotly~=5.23
+# To support python 3.11, google-cloud-bigquery requires grpcio>=1.49.1 (protobuf 4), which is incompatible with the
+# grpcio and protobuf versions required by frames<0.13 and kfp<2
+google-cloud-bigquery[pandas, bqstorage]==3.14.1
+google-cloud-storage==2.14.0
+google-cloud-bigquery-storage~=2.17
+google-cloud==0.34
 kafka-python~=2.0
 avro~=1.11
 redis~=4.3
 graphviz~=0.20.0
+mlflow~=2.16
+# any newer version then 0.13 should be tested with adlfs,gcsfs and s3fs installation.
+# we experience a different in google-auth package in databricks-sdk>0.13
+databricks-sdk~=0.20.0
+# sqlalchemy version should be aligned with mlrun-api due to common use with the model monitoring database
+sqlalchemy~=1.4
+# retaining old dask for compatibility with kfp 1.8
+dask~=2023.12.1; python_version < "3.11"
+distributed~=2023.12.1; python_version < "3.11"
+# new dask requires newer cloudpickle which is not compatible with kfp 1.8
+dask~=2024.12.1; python_version >= "3.11"
+distributed~=2024.12.1; python_version >= "3.11"
+taos-ws-py==0.3.2
+taoswswrap~=0.3.0
+snowflake-connector-python~=3.7

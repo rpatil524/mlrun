@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -119,7 +119,9 @@ def test_check_permissions(rundb_mock, monkeypatch):
             "string": ["ab", "cd", "ef"],
         }
     )
-    data_set1 = fstore.FeatureSet("fs1", entities=[Entity("string")])
+    data_set1 = fstore.FeatureSet(
+        "fs1", entities=[Entity("string")], timestamp_key="time_stamp"
+    )
 
     monkeypatch.setattr(
         rundb_mock,
@@ -132,23 +134,20 @@ def test_check_permissions(rundb_mock, monkeypatch):
             data_set1,
             data,
             entity_columns=[Entity("string")],
-            timestamp_key="time_stamp",
         )
     with pytest.raises(mlrun.errors.MLRunAccessDeniedError):
-        fstore.ingest(data_set1, data, infer_options=fstore.InferOptions.default())
+        data_set1.ingest(data, infer_options=fstore.InferOptions.default())
 
     features = ["fs1.*"]
     feature_vector = fstore.FeatureVector("test", features)
     with pytest.raises(mlrun.errors.MLRunAccessDeniedError):
-        fstore.get_offline_features(
-            feature_vector, entity_timestamp_column="time_stamp"
-        )
+        fstore.get_offline_features(feature_vector)
 
     with pytest.raises(mlrun.errors.MLRunAccessDeniedError):
         fstore.get_online_feature_service(feature_vector)
 
     with pytest.raises(mlrun.errors.MLRunAccessDeniedError):
-        fstore.deploy_ingestion_service(featureset=data_set1)
+        data_set1.deploy_ingestion_service()
 
     with pytest.raises(mlrun.errors.MLRunAccessDeniedError):
         data_set1.purge_targets()

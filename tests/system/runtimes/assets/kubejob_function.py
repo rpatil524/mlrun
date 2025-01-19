@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ def hello_world(context):
     context.logger.info("hello world")
 
 
-class mycls:
+class MyCls:
     def __init__(self, context=None, a1=1):
         self.context = context
         self.a1 = a1

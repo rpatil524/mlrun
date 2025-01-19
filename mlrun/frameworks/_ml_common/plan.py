@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ import json
 from abc import ABC, abstractmethod
 from enum import Enum
 
-from IPython.core.display import HTML, display
+from IPython.display import HTML, display
 
 import mlrun
 
@@ -57,7 +57,7 @@ class MLPlan(Plan, ABC):
                                    False.
         """
         self._need_probabilities = need_probabilities
-        super(MLPlan, self).__init__()
+        super().__init__()
 
     @property
     def need_probabilities(self) -> bool:

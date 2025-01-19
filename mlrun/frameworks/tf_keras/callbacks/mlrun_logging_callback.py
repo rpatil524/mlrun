@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Callable, Dict, List, Union
+from typing import Callable, Optional, Union
 
 import mlrun
 from mlrun.artifacts import Artifact
@@ -50,16 +50,19 @@ class MLRunLoggingCallback(LoggingCallback):
         context: mlrun.MLClientCtx,
         model_handler: TFKerasModelHandler,
         log_model_tag: str = "",
-        log_model_labels: Dict[str, TFKerasTypes.TrackableType] = None,
-        log_model_parameters: Dict[str, TFKerasTypes.TrackableType] = None,
-        log_model_extra_data: Dict[
-            str, Union[TFKerasTypes.TrackableType, Artifact]
+        log_model_labels: Optional[dict[str, TFKerasTypes.TrackableType]] = None,
+        log_model_parameters: Optional[dict[str, TFKerasTypes.TrackableType]] = None,
+        log_model_extra_data: Optional[
+            dict[str, Union[TFKerasTypes.TrackableType, Artifact]]
         ] = None,
-        dynamic_hyperparameters: Dict[
-            str, Union[List[Union[str, int]], Callable[[], TFKerasTypes.TrackableType]]
+        dynamic_hyperparameters: Optional[
+            dict[
+                str,
+                Union[list[Union[str, int]], Callable[[], TFKerasTypes.TrackableType]],
+            ]
         ] = None,
-        static_hyperparameters: Dict[
-            str, Union[TFKerasTypes, List[Union[str, int]]]
+        static_hyperparameters: Optional[
+            dict[str, Union[TFKerasTypes, list[Union[str, int]]]]
         ] = None,
         auto_log: bool = False,
     ):
@@ -97,7 +100,7 @@ class MLRunLoggingCallback(LoggingCallback):
                                          trying to track common static and dynamic hyperparameters such as learning
                                          rate.
         """
-        super(MLRunLoggingCallback, self).__init__(
+        super().__init__(
             dynamic_hyperparameters=dynamic_hyperparameters,
             static_hyperparameters=static_hyperparameters,
             auto_log=auto_log,
@@ -116,7 +119,7 @@ class MLRunLoggingCallback(LoggingCallback):
         # Store the model handler:
         self._model_handler = model_handler
 
-    def on_train_end(self, logs: dict = None):
+    def on_train_end(self, logs: Optional[dict] = None):
         """
         Called at the end of training, logging the model and the summaries of this run.
 
@@ -125,7 +128,7 @@ class MLRunLoggingCallback(LoggingCallback):
         """
         self._end_run()
 
-    def on_test_end(self, logs: dict = None):
+    def on_test_end(self, logs: Optional[dict] = None):
         """
         Called at the end of evaluation or validation. Will be called on each epoch according to the validation
         per epoch configuration. The recent evaluation / validation results will be summarized and logged. If the logger
@@ -134,14 +137,14 @@ class MLRunLoggingCallback(LoggingCallback):
         :param logs: Currently no data is passed to this argument for this method but that may change in the
                      future.
         """
-        super(MLRunLoggingCallback, self).on_test_end(logs=logs)
+        super().on_test_end(logs=logs)
 
         # Check if its part of evaluation. If so, end the run:
         if self._logger.mode == LoggingMode.EVALUATION:
             self._logger.log_epoch_to_context(epoch=1)
             self._end_run()
 
-    def on_epoch_end(self, epoch: int, logs: dict = None):
+    def on_epoch_end(self, epoch: int, logs: Optional[dict] = None):
         """
         Called at the end of an epoch, logging the dynamic hyperparameters and results of this epoch via the stored
         context.
@@ -151,7 +154,7 @@ class MLRunLoggingCallback(LoggingCallback):
                       performed. Validation result keys are prefixed with `val_`. For training epoch, the values of the
                       `Model`'s metrics are returned. Example : `{'loss': 0.2, 'acc': 0.7}`.
         """
-        super(MLRunLoggingCallback, self).on_epoch_end(epoch=epoch)
+        super().on_epoch_end(epoch=epoch)
 
         # Log the current epoch's results:
         self._logger.log_epoch_to_context(epoch=epoch)

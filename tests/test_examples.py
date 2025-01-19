@@ -1,4 +1,4 @@
-# Copyright 2019 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ def db():
 def test_example(db, fname):
     path = examples_path / fname
     env = environ.copy()
-    env["MLRUN_httpdb__dsn"] = dsn
+    env["MLRUN_HTTPDB__DSN"] = dsn
     cmd = [
         executable,
         "-m",

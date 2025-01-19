@@ -1,5 +1,20 @@
-uvicorn~=0.20.0
+uvicorn~=0.32.1
 dask-kubernetes~=0.11.0
-apscheduler~=3.6
-sqlite3-to-mysql~=1.4
-objgraph~=3.5
+# no support for 4 yet
+# 3.10.2 is bugged for python 3.9
+apscheduler>=3.11,<4
+objgraph~=3.6
+igz-mgmt~=0.4.1
+humanfriendly~=10.0
+fastapi~=0.115.6
+# in sqlalchemy>=2.0 there is breaking changes (such as in Table class autoload argument is removed)
+sqlalchemy~=1.4
+pymysql~=1.1
+alembic~=1.14
+timelength~=1.1
+memray~=1.12; sys_platform != 'win32'
+aiosmtplib~=3.0
+# until https://github.com/fastapi/fastapi/issues/10360 is solved
+pydantic>=1,<2
+# ensure kfp is installed
+mlrun-pipelines-kfp-v1-8[kfp]~=0.3.5; python_version < "3.11"

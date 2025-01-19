@@ -1,4 +1,4 @@
-# Copyright 2023 MLRun Authors
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
 import pytest
 
@@ -39,7 +38,6 @@ def my_func(context, p1=1, p2="a-string"):
     x = context.dask_client.submit(inc, p1)
 
     context.log_result("accuracy", x.result())
-    context.log_metric("loss", 7)
     context.log_artifact("chart", body="abc")
     return f"tst-me-{context.iteration}"
 

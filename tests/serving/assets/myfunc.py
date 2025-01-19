@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ def myhand(x, context=None):
     return x * 2
 
 
-class Mycls(storey.MapClass):
+class MyCls(storey.MapClass):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

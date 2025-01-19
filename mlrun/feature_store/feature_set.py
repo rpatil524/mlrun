@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,15 +13,16 @@
 # limitations under the License.
 import warnings
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 import pandas as pd
 from storey import EmitEveryEvent, EmitPolicy
 
 import mlrun
-import mlrun.api.schemas
+import mlrun.common.schemas
 
 from ..config import config as mlconf
+from ..data_types import InferOptions
 from ..datastore import get_store_uri
 from ..datastore.sources import BaseSourceDriver, source_kind_to_driver
 from ..datastore.targets import (
@@ -44,11 +45,12 @@ from ..model import (
     ObjectList,
     VersionedObjMetadata,
 )
+from ..runtimes import BaseRuntime
 from ..runtimes.function_reference import FunctionReference
 from ..serving.states import BaseStep, RootFlowStep, previous_step, queue_class_names
 from ..serving.utils import StepToDict
 from ..utils import StorePrefix, logger
-from .common import verify_feature_set_permissions
+from .common import RunConfig, verify_feature_set_permissions
 
 aggregates_step = "Aggregates"
 
@@ -117,9 +119,9 @@ class FeatureSetSpec(ModelObj):
 
         self.owner = owner
         self.description = description
-        self.entities: List[Union[Entity, str]] = entities or []
-        self.relations: Dict[str, Union[Entity, str]] = relations or {}
-        self.features: List[Feature] = features or []
+        self.entities: list[Union[Entity, str]] = entities or []
+        self.relations: dict[str, Union[Entity, str]] = relations or {}
+        self.features: list[Feature] = features or []
         self.partition_keys = partition_keys or []
         self.timestamp_key = timestamp_key
         self.source = source
@@ -131,14 +133,15 @@ class FeatureSetSpec(ModelObj):
         self.engine = engine
         self.output_path = output_path or mlconf.artifact_path
         self.passthrough = passthrough
+        self.with_default_targets = True
 
     @property
-    def entities(self) -> List[Entity]:
+    def entities(self) -> list[Entity]:
         """feature set entities (indexes)"""
         return self._entities
 
     @entities.setter
-    def entities(self, entities: List[Union[Entity, str]]):
+    def entities(self, entities: list[Union[Entity, str]]):
         if entities:
             # if the entity is a string, convert it to Entity class
             for i, entity in enumerate(entities):
@@ -160,21 +163,21 @@ class FeatureSetSpec(ModelObj):
         self._entities = ObjectList.from_list(Entity, entities)
 
     @property
-    def features(self) -> List[Feature]:
+    def features(self) -> list[Feature]:
         """feature set features list"""
         return self._features
 
     @features.setter
-    def features(self, features: List[Feature]):
+    def features(self, features: list[Feature]):
         self._features = ObjectList.from_list(Feature, features)
 
     @property
-    def targets(self) -> List[DataTargetBase]:
+    def targets(self) -> list[DataTargetBase]:
         """list of desired targets (material storage)"""
         return self._targets
 
     @targets.setter
-    def targets(self, targets: List[DataTargetBase]):
+    def targets(self, targets: list[DataTargetBase]):
         self._targets = ObjectList.from_list(DataTargetBase, targets)
 
     @property
@@ -185,7 +188,8 @@ class FeatureSetSpec(ModelObj):
     @engine.setter
     def engine(self, engine: str):
         engine_list = ["pandas", "spark", "storey"]
-        if engine and engine not in engine_list:
+        engine = engine if engine else "storey"
+        if engine not in engine_list:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 f"engine must be one of {','.join(engine_list)}"
             )
@@ -226,12 +230,12 @@ class FeatureSetSpec(ModelObj):
         self._source = source
 
     @property
-    def relations(self) -> Dict[str, Entity]:
+    def relations(self) -> dict[str, Entity]:
         """feature set relations dict"""
         return self._relations
 
     @relations.setter
-    def relations(self, relations: Dict[str, Entity]):
+    def relations(self, relations: dict[str, Entity]):
         for col, ent in relations.items():
             if isinstance(ent, str):
                 relations[col] = Entity(ent)
@@ -271,7 +275,7 @@ class FeatureSetStatus(ModelObj):
         :param run_uri: last run used for ingestion
         """
 
-        self.state = state or "created"
+        self.state = state or mlrun.common.schemas.object.ObjectStatusState.CREATED
         self._targets: ObjectList = None
         self.targets = targets or []
         self.stats = stats or {}
@@ -280,12 +284,12 @@ class FeatureSetStatus(ModelObj):
         self.run_uri = run_uri
 
     @property
-    def targets(self) -> List[DataTarget]:
+    def targets(self) -> list[DataTarget]:
         """list of material storage targets + their status/path"""
         return self._targets
 
     @targets.setter
-    def targets(self, targets: List[DataTarget]):
+    def targets(self, targets: list[DataTarget]):
         self._targets = ObjectList.from_list(DataTarget, targets)
 
     def update_target(self, target: DataTarget):
@@ -314,29 +318,30 @@ def emit_policy_to_dict(policy: EmitPolicy):
 
 
 class FeatureSet(ModelObj):
-    """Feature set object, defines a set of features and their data pipeline"""
-
-    kind = mlrun.api.schemas.ObjectKind.feature_set.value
+    kind = mlrun.common.schemas.ObjectKind.feature_set.value
     _dict_fields = ["kind", "metadata", "spec", "status"]
 
     def __init__(
         self,
-        name: str = None,
-        description: str = None,
-        entities: List[Union[Entity, str]] = None,
-        timestamp_key: str = None,
-        engine: str = None,
-        label_column: str = None,
-        relations: Dict[str, Union[Entity, str]] = None,
-        passthrough: bool = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        entities: Optional[list[Union[Entity, str]]] = None,
+        timestamp_key: Optional[str] = None,
+        engine: Optional[str] = None,
+        label_column: Optional[str] = None,
+        relations: Optional[dict[str, Union[Entity, str]]] = None,
+        passthrough: Optional[bool] = None,
     ):
         """Feature set object, defines a set of features and their data pipeline
 
         example::
 
             import mlrun.feature_store as fstore
-            ticks = fstore.FeatureSet("ticks", entities=["stock"], timestamp_key="timestamp")
-            fstore.ingest(ticks, df)
+
+            ticks = fstore.FeatureSet(
+                "ticks", entities=["stock"], timestamp_key="timestamp"
+            )
+            ticks.ingest(df)
 
         :param name:          name of the feature set
         :param description:   text description
@@ -375,6 +380,7 @@ class FeatureSet(ModelObj):
         self.status = None
         self._last_state = ""
         self._aggregations = {}
+        self.set_targets()
 
     @property
     def spec(self) -> FeatureSetSpec:
@@ -415,21 +421,14 @@ class FeatureSet(ModelObj):
             fullname += ":" + self._metadata.tag
         return fullname
 
-    def _override_run_db(
-        self,
-        session,
-    ):
-        # Import here, since this method only runs in API context. If this import was global, client would need
-        # API requirements and would fail.
-        from ..api.api.utils import get_run_db_instance
-
-        self._run_db = get_run_db_instance(session)
-
     def _get_run_db(self):
         if self._run_db:
             return self._run_db
         else:
             return mlrun.get_run_db()
+
+    def _override_run_db(self, run_db):
+        self._run_db = run_db
 
     def get_target_path(self, name=None):
         """get the url/path for an offline or specified data target"""
@@ -439,7 +438,9 @@ class FeatureSet(ModelObj):
             target = get_online_target(self, name)
 
         if target:
-            return target.get_path().get_absolute_path()
+            return target.get_path().get_absolute_path(
+                project_name=self.metadata.project
+            )
 
     def set_targets(
         self,
@@ -473,10 +474,25 @@ class FeatureSet(ModelObj):
             )
         targets = targets or []
         if with_defaults:
-            targets.extend(get_default_targets())
+            self.spec.with_default_targets = True
+            targets.extend(get_default_targets(offline_only=self.spec.passthrough))
+        else:
+            self.spec.with_default_targets = False
 
+        self.spec.targets = []
+        self.__set_targets_add_targets_helper(targets)
+
+        if default_final_step:
+            self.spec.graph.final_step = default_final_step
+
+    def __set_targets_add_targets_helper(self, targets):
+        """
+        Add the desired target list
+
+        :param targets: list of target type names ('csv', 'nosql', ..) or target objects
+                         CSVTarget(), ParquetTarget(), NoSqlTarget(), StreamTarget(), ..
+        """
         validate_target_list(targets=targets)
-
         for target in targets:
             kind = target.kind if hasattr(target, "kind") else target
             if kind not in TargetTypes.all():
@@ -488,8 +504,6 @@ class FeatureSet(ModelObj):
                     target, name=str(target), partitioned=(target == "parquet")
                 )
             self.spec.targets.update(target)
-        if default_final_step:
-            self.spec.graph.final_step = default_final_step
 
     def validate_steps(self, namespace):
         if not self.spec:
@@ -519,13 +533,15 @@ class FeatureSet(ModelObj):
                     self, **(class_args if class_args is not None else {})
                 )
 
-    def purge_targets(self, target_names: List[str] = None, silent: bool = False):
+    def purge_targets(
+        self, target_names: Optional[list[str]] = None, silent: bool = False
+    ):
         """Delete data of specific targets
         :param target_names: List of names of targets to delete (default: delete all ingested targets)
         :param silent: Fail silently if target doesn't exist in featureset status"""
 
         verify_feature_set_permissions(
-            self, mlrun.api.schemas.AuthorizationAction.delete
+            self, mlrun.common.schemas.AuthorizationAction.delete
         )
 
         purge_targets = self._reload_and_get_status_targets(
@@ -547,8 +563,8 @@ class FeatureSet(ModelObj):
 
     def update_targets_for_ingest(
         self,
-        targets: List[DataTargetBase],
-        overwrite: bool = None,
+        targets: list[DataTargetBase],
+        overwrite: Optional[bool] = None,
     ):
         if not targets:
             return
@@ -568,7 +584,7 @@ class FeatureSet(ModelObj):
         update_targets_run_id_for_ingest(overwrite, targets, status_targets)
 
     def _reload_and_get_status_targets(
-        self, target_names: List[str] = None, silent: bool = False
+        self, target_names: Optional[list[str]] = None, silent: bool = False
     ):
         try:
             self.reload(update_spec=False)
@@ -589,9 +605,7 @@ class FeatureSet(ModelObj):
                         pass
                     else:
                         raise mlrun.errors.MLRunNotFoundError(
-                            "Target not found in status (fset={0}, target={1})".format(
-                                self.metadata.name, target_name
-                            )
+                            f"Target not found in status (fset={self.metadata.name}, target={target_name})"
                         )
         else:
             targets = self.status.targets
@@ -607,8 +621,8 @@ class FeatureSet(ModelObj):
         self,
         name: str,
         value_type: mlrun.data_types.ValueType = None,
-        description: str = None,
-        labels: Optional[Dict[str, str]] = None,
+        description: Optional[str] = None,
+        labels: Optional[dict[str, str]] = None,
     ):
         """add/set an entity (dataset index)
 
@@ -616,12 +630,12 @@ class FeatureSet(ModelObj):
 
             import mlrun.feature_store as fstore
 
-            ticks = fstore.FeatureSet("ticks",
-                            entities=["stock"],
-                            timestamp_key="timestamp")
-            ticks.add_entity("country",
-                            mlrun.data_types.ValueType.STRING,
-                            description="stock country")
+            ticks = fstore.FeatureSet(
+                "ticks", entities=["stock"], timestamp_key="timestamp"
+            )
+            ticks.add_entity(
+                "country", mlrun.data_types.ValueType.STRING, description="stock country"
+            )
             ticks.add_entity("year", mlrun.data_types.ValueType.INT16)
             ticks.save()
 
@@ -641,13 +655,23 @@ class FeatureSet(ModelObj):
             import mlrun.feature_store as fstore
             from mlrun.features import Feature
 
-            ticks = fstore.FeatureSet("ticks",
-                            entities=["stock"],
-                            timestamp_key="timestamp")
-            ticks.add_feature(Feature(value_type=mlrun.data_types.ValueType.STRING,
-                            description="client consistency"),"ABC01")
-            ticks.add_feature(Feature(value_type=mlrun.data_types.ValueType.FLOAT,
-                            description="client volatility"),"SAB")
+            ticks = fstore.FeatureSet(
+                "ticks", entities=["stock"], timestamp_key="timestamp"
+            )
+            ticks.add_feature(
+                Feature(
+                    value_type=mlrun.data_types.ValueType.STRING,
+                    description="client consistency",
+                ),
+                "ABC01",
+            )
+            ticks.add_feature(
+                Feature(
+                    value_type=mlrun.data_types.ValueType.FLOAT,
+                    description="client volatility",
+                ),
+                "SAB",
+            )
             ticks.save()
 
         :param feature:         setting of Feature
@@ -700,7 +724,6 @@ class FeatureSet(ModelObj):
         step_name=None,
         after=None,
         before=None,
-        state_name=None,
         emit_policy: EmitPolicy = None,
     ):
         """add feature aggregation rule
@@ -737,7 +760,6 @@ class FeatureSet(ModelObj):
         :param name:       optional, aggregation name/prefix. Must be unique per feature set. If not passed,
                             the column will be used as name.
         :param step_name: optional, graph step name
-        :param state_name: *Deprecated* - use step_name instead
         :param after:      optional, after which graph step it runs
         :param before:     optional, comes before graph step
         :param emit_policy: optional, which emit policy to use when performing the aggregations. Use the derived
@@ -750,14 +772,6 @@ class FeatureSet(ModelObj):
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "Invalid parameters provided - operations must be a list."
             )
-        if state_name:
-            warnings.warn(
-                "The 'state_name' parameter is deprecated in 1.3.0 and will be removed in 1.5.0. "
-                "Use 'step_name' instead.",
-                # TODO: remove in 1.5.0
-                FutureWarning,
-            )
-            step_name = step_name or state_name
 
         name = name or column
 
@@ -861,15 +875,18 @@ class FeatureSet(ModelObj):
         example::
 
             import mlrun.feature_store as fstore
+
             ...
-            ticks = fstore.FeatureSet("ticks",
-                            entities=["stock"],
-                            timestamp_key="timestamp")
-            ticks.add_aggregation(name='priceN',
-                                column='price',
-                                operations=['avg'],
-                                windows=['1d'],
-                                period='1h')
+            ticks = fstore.FeatureSet(
+                "ticks", entities=["stock"], timestamp_key="timestamp"
+            )
+            ticks.add_aggregation(
+                name="priceN",
+                column="price",
+                operations=["avg"],
+                windows=["1d"],
+                period="1h",
+            )
             ticks.plot(rankdir="LR", with_targets=True)
 
         :param filename:     target filepath for the graph image (None for the notebook)
@@ -902,6 +919,7 @@ class FeatureSet(ModelObj):
         start_time=None,
         end_time=None,
         time_column=None,
+        additional_filters=None,
         **kwargs,
     ):
         """return featureset (offline) data as dataframe
@@ -913,6 +931,12 @@ class FeatureSet(ModelObj):
         :param end_time:     filter by end time
         :param time_column:  specify the time column name in the file
         :param kwargs:       additional reader (csv, parquet, ..) args
+        :param additional_filters: List of additional_filter conditions as tuples.
+                                    Each tuple should be in the format (column_name, operator, value).
+                                    Supported operators: "=", ">=", "<=", ">", "<".
+                                    Example: [("Product", "=", "Computer")]
+                                    For all supported filters, please see:
+                                    https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetDataset.html
         :return: DataFrame
         """
         entities = list(self.spec.entities.keys())
@@ -926,7 +950,18 @@ class FeatureSet(ModelObj):
                 raise mlrun.errors.MLRunNotFoundError(
                     "passthrough feature set {self.metadata.name} with no source"
                 )
-            return self.spec.source.to_dataframe()
+            df = self.spec.source.to_dataframe(
+                columns=columns,
+                start_time=start_time,
+                end_time=end_time,
+                time_field=time_column,
+                additional_filters=additional_filters,
+                **kwargs,
+            )
+            # to_dataframe() can sometimes return an iterator of dataframes instead of one dataframe
+            if not isinstance(df, pd.DataFrame):
+                df = pd.concat(df)
+            return df
 
         target = get_offline_target(self, name=target_name)
         if not target:
@@ -940,24 +975,9 @@ class FeatureSet(ModelObj):
             start_time=start_time,
             end_time=end_time,
             time_column=time_column,
+            additional_filters=additional_filters,
             **kwargs,
         )
-        if not columns:
-            drop_cols = []
-            if target.time_partitioning_granularity:
-                for col in mlrun.utils.helpers.LEGAL_TIME_UNITS:
-                    drop_cols.append(col)
-                    if col == target.time_partitioning_granularity:
-                        break
-            elif (
-                target.partitioned
-                and not target.partition_cols
-                and not target.key_bucketing_number
-            ):
-                drop_cols = mlrun.utils.helpers.DEFAULT_TIME_PARTITIONS
-            if drop_cols:
-                # if these columns aren't present for some reason, that's no reason to fail
-                result.drop(columns=drop_cols, inplace=True, errors="ignore")
         return result
 
     def save(self, tag="", versioned=False):
@@ -983,6 +1003,198 @@ class FeatureSet(ModelObj):
         if update_spec:
             self.spec = feature_set.spec
 
+    def ingest(
+        self,
+        source=None,
+        targets: Optional[list[DataTargetBase]] = None,
+        namespace=None,
+        return_df: bool = True,
+        infer_options: InferOptions = InferOptions.default(),
+        run_config: RunConfig = None,
+        mlrun_context=None,
+        spark_context=None,
+        overwrite=None,
+    ) -> Optional[pd.DataFrame]:
+        """Read local DataFrame, file, URL, or source into the feature store
+        Ingest reads from the source, run the graph transformations, infers  metadata and stats
+        and writes the results to the default of specified targets
+
+        when targets are not specified data is stored in the configured default targets
+        (will usually be NoSQL for real-time and Parquet for offline).
+
+        the `run_config` parameter allow specifying the function and job configuration,
+        see: :py:class:`~mlrun.feature_store.RunConfig`
+
+        example::
+
+            stocks_set = FeatureSet("stocks", entities=[Entity("ticker")])
+            stocks = pd.read_csv("stocks.csv")
+            df = stocks_set.ingest(stocks, infer_options=fstore.InferOptions.default())
+
+            # for running as remote job
+            config = RunConfig(image="mlrun/mlrun")
+            df = ingest(stocks_set, stocks, run_config=config)
+
+            # specify source and targets
+            source = CSVSource("mycsv", path="measurements.csv")
+            targets = [CSVTarget("mycsv", path="./mycsv.csv")]
+            ingest(measurements, source, targets)
+
+        :param source:        source dataframe or other sources (e.g. parquet source see:
+                            :py:class:`~mlrun.datastore.ParquetSource` and other classes in mlrun.datastore with suffix
+                            Source)
+        :param targets:       optional list of data target objects
+        :param namespace:     namespace or module containing graph classes
+        :param return_df:     indicate if to return a dataframe with the graph results
+        :param infer_options: schema (for discovery of entities, features in featureset), index, stats,
+                            histogram and preview infer options (:py:class:`~mlrun.feature_store.InferOptions`)
+        :param run_config:    function and/or run configuration for remote jobs,
+                            see :py:class:`~mlrun.feature_store.RunConfig`
+        :param mlrun_context: mlrun context (when running as a job), for internal use !
+        :param spark_context: local spark session for spark ingestion, example for creating the spark context:
+                            `spark = SparkSession.builder.appName("Spark function").getOrCreate()`
+                            For remote spark ingestion, this should contain the remote spark service name
+        :param overwrite:     delete the targets' data prior to ingestion
+                            (default: True for non scheduled ingest - deletes the targets that are about to be ingested.
+                            False for scheduled ingest - does not delete the target)
+        :return:              if return_df is True, a dataframe will be returned based on the graph
+        """
+        return mlrun.feature_store.api._ingest(
+            self,
+            source,
+            targets,
+            namespace,
+            return_df,
+            infer_options,
+            run_config,
+            mlrun_context,
+            spark_context,
+            overwrite,
+        )
+
+    def preview(
+        self,
+        source,
+        entity_columns: Optional[list] = None,
+        namespace=None,
+        options: InferOptions = None,
+        verbose: bool = False,
+        sample_size: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """run the ingestion pipeline with local DataFrame/file data and infer features schema and stats
+
+        example::
+
+            quotes_set = FeatureSet("stock-quotes", entities=[Entity("ticker")])
+            quotes_set.add_aggregation("ask", ["sum", "max"], ["1h", "5h"], "10m")
+            quotes_set.add_aggregation("bid", ["min", "max"], ["1h"], "10m")
+            df = quotes_set.preview(
+                quotes_df,
+                entity_columns=["ticker"],
+            )
+
+        :param source:         source dataframe or csv/parquet file path
+        :param entity_columns: list of entity (index) column names
+        :param namespace:      namespace or module containing graph classes
+        :param options:        schema (for discovery of entities, features in featureset), index, stats,
+                            histogram and preview infer options (:py:class:`~mlrun.feature_store.InferOptions`)
+        :param verbose:        verbose log
+        :param sample_size:    num of rows to sample from the dataset (for large datasets)
+        """
+        return mlrun.feature_store.api._preview(
+            self, source, entity_columns, namespace, options, verbose, sample_size
+        )
+
+    def deploy_ingestion_service(
+        self,
+        source: DataSource = None,
+        targets: Optional[list[DataTargetBase]] = None,
+        name: Optional[str] = None,
+        run_config: RunConfig = None,
+        verbose=False,
+    ) -> tuple[str, BaseRuntime]:
+        """Start real-time ingestion service using nuclio function
+
+        Deploy a real-time function implementing feature ingestion pipeline
+        the source maps to Nuclio event triggers (http, kafka, v3io stream, etc.)
+
+        the `run_config` parameter allow specifying the function and job configuration,
+        see: :py:class:`~mlrun.feature_store.RunConfig`
+
+        example::
+
+            source = HTTPSource()
+            func = mlrun.code_to_function("ingest", kind="serving").apply(mount_v3io())
+            config = RunConfig(function=func)
+            my_set.deploy_ingestion_service(source, run_config=config)
+
+        :param source:        data source object describing the online or offline source
+        :param targets:       list of data target objects
+        :param name:          name for the job/function
+        :param run_config:    service runtime configuration (function object/uri, resources, etc..)
+        :param verbose:       verbose log
+
+        :return: URL to access the deployed ingestion service, and the function that was deployed (which will
+                differ from the function passed in via the run_config parameter).
+        """
+
+        return mlrun.feature_store.api._deploy_ingestion_service_v2(
+            self, source, targets, name, run_config, verbose
+        )
+
+    def extract_relation_keys(
+        self,
+        other_feature_set,
+        relations: Optional[dict[str, Union[str, Entity]]] = None,
+    ) -> list[str]:
+        """
+        Checks whether a feature set can be merged to the right of this feature set.
+
+        :param other_feature_set:   The feature set to be merged to the right of this feature set.
+        :param relations:           The relations that were defined on this feature set.
+        :returns:                   If the two feature sets can be merged, a list of the left join keys is returned.
+                                    Otherwise, an empty list is returned.
+                                    (The right join keys are always the entities of the other feature set)
+        """
+        right_feature_set_entity_list = other_feature_set.spec.entities
+
+        if all(
+            ent in self.spec.entities for ent in right_feature_set_entity_list
+        ) and len(right_feature_set_entity_list) == len(self.spec.entities):
+            # entities wise
+            return list(self.spec.entities.keys())
+        elif all(ent in self.spec.entities for ent in right_feature_set_entity_list):
+            # entities wise when the right fset have lower number of entities
+            return list(right_feature_set_entity_list.keys())
+
+        elif relations:
+            curr_col_relations_list = list(
+                map(
+                    lambda ent: (
+                        list(relations.keys())[list(relations.values()).index(ent)]
+                        if ent in relations.values()
+                        else False
+                    ),
+                    right_feature_set_entity_list,
+                )
+            )
+
+            if all(curr_col_relations_list):
+                return curr_col_relations_list
+
+        return []
+
+    def is_connectable_to_df(self, df_columns: list[str]) -> bool:
+        """
+        This method checks if the dataframe can be left-joined with this feature set
+
+        :param df_columns:  The columns of the data frame you want to merge to the left of this feature set
+        :return:            True if it can be left-joined and False otherwise
+        """
+        return df_columns and all(
+            ent in df_columns for ent in self.spec.entities.keys()
+        )
+
 
 class SparkAggregateByKey(StepToDict):
     _supported_operations = [
@@ -1000,10 +1212,10 @@ class SparkAggregateByKey(StepToDict):
 
     def __init__(
         self,
-        key_columns: List[str],
+        key_columns: list[str],
         time_column: str,
-        aggregates: List[Dict],
-        emit_policy: Union[EmitPolicy, Dict] = None,
+        aggregates: list[dict],
+        emit_policy: Union[EmitPolicy, dict] = None,
     ):
         self.key_columns = key_columns
         self.time_column = time_column

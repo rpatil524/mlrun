@@ -1,4 +1,4 @@
-# Copyright 2021 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,16 +13,15 @@
 # limitations under the License.
 import re
 from subprocess import run
+from typing import Optional
 
 import kubernetes.client
 
 import mlrun.errors
 from mlrun.config import config
+from mlrun.runtimes.mounts import mount_v3io, mount_v3iod
 
-from ..model import RunObject
-from ..platforms.iguazio import mount_v3io, mount_v3iod
-from .base import RuntimeClassMode
-from .kubejob import KubejobRuntime, KubeRuntimeHandler
+from .kubejob import KubejobRuntime
 from .pod import KubeResourceSpec
 
 
@@ -59,6 +58,7 @@ class RemoteSparkSpec(KubeResourceSpec):
         preemption_mode=None,
         security_context=None,
         clone_target_dir=None,
+        state_thresholds=None,
     ):
         super().__init__(
             command=command,
@@ -88,11 +88,12 @@ class RemoteSparkSpec(KubeResourceSpec):
             preemption_mode=preemption_mode,
             security_context=security_context,
             clone_target_dir=clone_target_dir,
+            state_thresholds=state_thresholds,
         )
         self.provider = provider
 
 
-class RemoteSparkProviders(object):
+class RemoteSparkProviders:
     iguazio = "iguazio"
 
 
@@ -102,16 +103,13 @@ class RemoteSparkRuntime(KubejobRuntime):
 
     @classmethod
     def deploy_default_image(cls):
-        from mlrun import get_run_db
-        from mlrun.run import new_function
-
-        sj = new_function(
+        sj = mlrun.new_function(
             kind="remote-spark", name="remote-spark-default-image-deploy-temp"
         )
         sj.spec.build.image = cls.default_image
         sj.with_spark_service(spark_service="dummy-spark")
         sj.deploy()
-        get_run_db().delete_function(name=sj.metadata.name)
+        mlrun.get_run_db().delete_function(name=sj.metadata.name)
 
     def is_deployed(self):
         if (
@@ -122,10 +120,6 @@ class RemoteSparkRuntime(KubejobRuntime):
             return True
         return super().is_deployed()
 
-    def _run(self, runobj: RunObject, execution):
-        self.spec.image = self.spec.image or self.default_image
-        super()._run(runobj=runobj, execution=execution)
-
     @property
     def spec(self) -> RemoteSparkSpec:
         return self._spec
@@ -134,14 +128,20 @@ class RemoteSparkRuntime(KubejobRuntime):
     def spec(self, spec):
         self._spec = self._verify_dict(spec, "spec", RemoteSparkSpec)
 
-    def with_spark_service(self, spark_service, provider=RemoteSparkProviders.iguazio):
+    def with_spark_service(
+        self,
+        spark_service,
+        provider=RemoteSparkProviders.iguazio,
+        with_v3io_mount=True,
+    ):
         """Attach spark service to function"""
         self.spec.provider = provider
         if provider == RemoteSparkProviders.iguazio:
             self.spec.env.append(
                 {"name": "MLRUN_SPARK_CLIENT_IGZ_SPARK", "value": "true"}
             )
-            self.apply(mount_v3io())
+            if with_v3io_mount:
+                self.apply(mount_v3io())
             self.apply(
                 mount_v3iod(
                     namespace=config.namespace,
@@ -180,8 +180,9 @@ class RemoteSparkRuntime(KubejobRuntime):
         skip_deployed=False,
         is_kfp=False,
         mlrun_version_specifier=None,
-        builder_env: dict = None,
+        builder_env: Optional[dict] = None,
         show_on_failure: bool = False,
+        force_build: bool = False,
     ):
         """deploy function, build container with dependencies
 
@@ -193,6 +194,7 @@ class RemoteSparkRuntime(KubejobRuntime):
         :param builder_env:             Kaniko builder pod env vars dict (for config/credentials)
                                         e.g. builder_env={"GIT_TOKEN": token}
         :param show_on_failure:         show logs only in case of build failure
+        :param force_build:             force building the image, even when no changes were made
 
         :return True if the function is ready (deployed)
         """
@@ -207,20 +209,8 @@ class RemoteSparkRuntime(KubejobRuntime):
             mlrun_version_specifier=mlrun_version_specifier,
             builder_env=builder_env,
             show_on_failure=show_on_failure,
+            force_build=force_build,
         )
-
-
-class RemoteSparkRuntimeHandler(KubeRuntimeHandler):
-    kind = "remote-spark"
-    class_modes = {RuntimeClassMode.run: "remote-spark"}
-
-    @staticmethod
-    def _are_resources_coupled_to_run_object() -> bool:
-        return True
-
-    @staticmethod
-    def _get_object_label_selector(object_id: str) -> str:
-        return f"mlrun/uid={object_id}"
 
 
 def igz_spark_pre_hook():

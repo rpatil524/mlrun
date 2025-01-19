@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 #
 import os
 import pickle
-from typing import Dict, List, Union
+from typing import Optional, Union
 
 import cloudpickle
 
@@ -45,11 +45,15 @@ class XGBoostModelHandler(MLModelHandler):
     def __init__(
         self,
         model: XGBoostTypes.ModelType = None,
-        model_path: str = None,
-        model_name: str = None,
-        modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
-        custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
-        custom_objects_directory: str = None,
+        model_path: Optional[str] = None,
+        model_name: Optional[str] = None,
+        modules_map: Optional[
+            Union[dict[str, Union[None, str, list[str]]], str]
+        ] = None,
+        custom_objects_map: Optional[
+            Union[dict[str, Union[str, list[str]]], str]
+        ] = None,
+        custom_objects_directory: Optional[str] = None,
         context: mlrun.MLClientCtx = None,
         model_format: str = ModelFormats.PKL,
         **kwargs,
@@ -124,7 +128,7 @@ class XGBoostModelHandler(MLModelHandler):
         # Store the configuration:
         self._model_format = model_format
 
-        super(XGBoostModelHandler, self).__init__(
+        super().__init__(
             model=model,
             model_path=model_path,
             model_name=model_name,
@@ -152,7 +156,7 @@ class XGBoostModelHandler(MLModelHandler):
                 )
 
     @without_mlrun_interface(interface=XGBModelMLRunInterface)
-    def save(self, output_path: str = None, **kwargs):
+    def save(self, output_path: Optional[str] = None, **kwargs):
         """
         Save the handled model at the given output path. If a MLRun context is available, the saved model files will be
         logged and returned as artifacts.
@@ -162,7 +166,7 @@ class XGBoostModelHandler(MLModelHandler):
 
         :return The saved model additional artifacts (if needed) dictionary if context is available and None otherwise.
         """
-        super(XGBoostModelHandler, self).save(output_path=output_path)
+        super().save(output_path=output_path)
 
         # ModelFormats.PICKLE - Save from a pkl file:
         if self._model_format == XGBoostModelHandler.ModelFormats.PKL:
@@ -177,7 +181,7 @@ class XGBoostModelHandler(MLModelHandler):
         Load the specified model in this handler. Additional parameters for the class initializer can be passed via the
         kwargs dictionary.
         """
-        super(XGBoostModelHandler, self).load()
+        super().load()
 
         # ModelFormats.PICKLE - Load from a pkl file:
         if self._model_format == XGBoostModelHandler.ModelFormats.PKL:
@@ -186,10 +190,10 @@ class XGBoostModelHandler(MLModelHandler):
 
     def to_onnx(
         self,
-        model_name: str = None,
+        model_name: Optional[str] = None,
         optimize: bool = True,
         input_sample: XGBoostTypes = None,
-        log: bool = None,
+        log: Optional[bool] = None,
     ):
         """
         Convert the model in this handler to an ONNX model. The inputs names are optional, they do not change the

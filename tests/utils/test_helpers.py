@@ -1,4 +1,4 @@
-# Copyright 2018 Iguazio
+# Copyright 2023 Iguazio
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import asyncio
 import re
 import unittest.mock
 from contextlib import nullcontext as does_not_raise
+from datetime import datetime, timezone
 
 import pytest
 from pandas import Timedelta, Timestamp
@@ -29,18 +31,25 @@ from mlrun.utils.helpers import (
     StorePrefix,
     enrich_image_url,
     extend_hub_uri_if_needed,
-    fill_artifact_path_template,
     get_parsed_docker_registry,
     get_pretty_types_names,
     get_regex_list_as_string,
+    parse_artifact_uri,
     resolve_image_tag_suffix,
     str_to_timestamp,
+    template_artifact_path,
     update_in,
     validate_artifact_key_name,
     validate_tag_name,
+    validate_v3io_stream_consumer_group,
     verify_field_regex,
     verify_list_items_type,
 )
+
+STORE_PREFIX = "store://{kind}/dummy-project/dummy-db-key"
+ARTIFACT_STORE_PREFIX = STORE_PREFIX.format(kind=StorePrefix.Artifact)
+DATASET_STORE_PREFIX = STORE_PREFIX.format(kind=StorePrefix.Dataset)
+MODEL_STORE_PREFIX = STORE_PREFIX.format(kind=StorePrefix.Model)
 
 
 def test_retry_until_successful_fatal_failure():
@@ -53,6 +62,51 @@ def test_retry_until_successful_fatal_failure():
         mlrun.utils.helpers.retry_until_successful(
             0, 1, logger, True, _raise_fatal_failure
         )
+
+
+@pytest.mark.parametrize(
+    "d,expected",
+    [
+        (
+            "2024-11-11 07:44:56.255000+0000",
+            datetime(2024, 11, 11, 7, 44, 56, 255000, tzinfo=timezone.utc),
+        ),
+        (
+            "2024-11-11 07:44:56+0000",
+            datetime(2024, 11, 11, 7, 44, 56, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_enrich_datetime_with_tz_info(d, expected: datetime):
+    assert expected == mlrun.utils.helpers.enrich_datetime_with_tz_info(d)
+
+
+def test_retry_until_successful_sync():
+    counter = 0
+
+    def increase_counter():
+        nonlocal counter
+        counter += 1
+        if counter < 3:
+            raise Exception("error")
+
+    mlrun.utils.helpers.retry_until_successful(0, 3, logger, True, increase_counter)
+
+
+@pytest.mark.asyncio
+async def test_retry_until_successful_async():
+    counter = 0
+
+    async def increase_counter():
+        await asyncio.sleep(0.1)
+        nonlocal counter
+        counter += 1
+        if counter < 3:
+            raise Exception("error")
+
+    await mlrun.utils.helpers.retry_until_successful_async(
+        0, 3, logger, True, increase_counter
+    )
 
 
 @pytest.mark.parametrize(
@@ -83,7 +137,7 @@ def test_retry_until_successful_fatal_failure():
             pytest.raises(mlrun.errors.MLRunInvalidArgumentError),
         ),
         (
-            # Invalid because it's more then 63 characters
+            # Invalid because it's more than 63 characters
             "azsxdcfvg-azsxdcfvg-azsxdcfvg-azsxdcfvg-azsxdcfvg-azsxdcfvg-azsx",
             pytest.raises(mlrun.errors.MLRunInvalidArgumentError),
         ),
@@ -92,6 +146,19 @@ def test_retry_until_successful_fatal_failure():
 def test_run_name_regex(value, expected):
     with expected:
         verify_field_regex("test_field", value, mlrun.utils.regex.run_name)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("{{pipelineparam:op=;name=mem}}", does_not_raise()),
+        ("{{pipelineparam:op=2;name=mem}}", does_not_raise()),
+        ("{{pipelineparam:op=10Mb;name=mem}}", does_not_raise()),
+    ],
+)
+def test_pipeline_param(value, expected):
+    with expected:
+        verify_field_regex("test_field", value, mlrun.utils.regex.pipeline_param)
 
 
 @pytest.mark.parametrize(
@@ -136,42 +203,39 @@ def test_spark_job_name_regex(value, expected):
         verify_field_regex("test_field", value, mlrun.utils.regex.sparkjob_name)
 
 
-def test_extend_hub_uri():
-    hub_urls = [
-        "https://raw.githubusercontent.com/mlrun/functions/{tag}/{name}/function.yaml",
-        "https://raw.githubusercontent.com/mlrun/functions",
-    ]
-    cases = [
+@pytest.mark.parametrize(
+    "case",
+    [
         {
             "input_uri": "http://no-hub-prefix",
             "expected_output": "http://no-hub-prefix",
         },
         {
             "input_uri": "hub://function_name",
-            "expected_output": "https://raw.githubusercontent.com/mlrun/functions/master/function_name/function.yaml",
+            "expected_output": "function_name/latest/src/function.yaml",
         },
         {
-            "input_uri": "hub://function_name:development",
-            "expected_output": "https://raw.githubusercontent.com/mlrun/functions/development/function_name/function.ya"
-            "ml",
+            "input_uri": "hub://function_name:1.2.3",
+            "expected_output": "function_name/1.2.3/src/function.yaml",
         },
         {
-            "input_uri": "hub://function-name",
-            "expected_output": "https://raw.githubusercontent.com/mlrun/functions/master/function_name/function.yaml",
+            "input_uri": "hub://default/function-name",
+            "expected_output": "function_name/latest/src/function.yaml",
         },
         {
-            "input_uri": "hub://function-name:development",
-            "expected_output": "https://raw.githubusercontent.com/mlrun/functions/development/function_name/function.ya"
-            "ml",
+            "input_uri": "hub://default/function-name:3.4.5",
+            "expected_output": "function_name/3.4.5/src/function.yaml",
         },
-    ]
-    for hub_url in hub_urls:
-        mlrun.mlconf.hub_url = hub_url
-        for case in cases:
-            input_uri = case["input_uri"]
-            expected_output = case["expected_output"]
-            output, _ = extend_hub_uri_if_needed(input_uri)
-            assert expected_output == output
+    ],
+)
+def test_extend_hub_uri(rundb_mock, case):
+    hub_url = mlrun.mlconf.get_default_hub_source()
+    input_uri = case["input_uri"]
+    expected_output = case["expected_output"]
+    output, is_hub_url = extend_hub_uri_if_needed(input_uri)
+    if is_hub_url:
+        expected_output = hub_url + expected_output
+    assert expected_output == output
 
 
 @pytest.mark.parametrize(
@@ -275,11 +339,21 @@ def test_validate_tag_name(tag_name, expected):
             "artifact-name\\test",
             pytest.raises(mlrun.errors.MLRunInvalidArgumentError),
         ),
+        ("", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+        (
+            "artifact-name#",
+            pytest.raises(mlrun.errors.MLRunInvalidArgumentError),
+        ),
+        ("artifact@name", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+        ("artifact#name", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+        ("artifact-name#", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+        ("artifact:name", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+        ("artifact_name$", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
         # Valid names
         ("artifact-name2.0", does_not_raise()),
-        ("artifact-name", does_not_raise()),
-        ("artifact-name", does_not_raise()),
-        ("artifact-name_chars@#$", does_not_raise()),
+        ("artifact-name3", does_not_raise()),
+        ("artifact_name", does_not_raise()),
+        ("artifact.name", does_not_raise()),
         ("artifactNAME", does_not_raise()),
     ],
 )
@@ -289,10 +363,150 @@ def test_validate_artifact_name(artifact_name, expected):
             artifact_name,
             field_name="artifact.key",
         )
+    with expected:
+        validate_artifact_key_name(
+            artifact_name,
+            field_name="artifact.db_key",
+        )
 
 
-def test_enrich_image():
-    cases = [
+@pytest.mark.parametrize(
+    "uri,project,expected_project,expected_key,expected_iteration,expected_tag,expected_tree,expected_uid",
+    [
+        # Backward compatibility: URI without uid
+        ("artifact_key", "default", "default", "artifact_key", 0, None, None, None),
+        (
+            "project_name/artifact_key",
+            "",
+            "project_name",
+            "artifact_key",
+            0,
+            None,
+            None,
+            None,
+        ),
+        (
+            "project_name/artifact_key#1",
+            "",
+            "project_name",
+            "artifact_key",
+            1,
+            None,
+            None,
+            None,
+        ),
+        (
+            "project_name/artifact_key:latest",
+            "",
+            "project_name",
+            "artifact_key",
+            0,
+            "latest",
+            None,
+            None,
+        ),
+        (
+            "project_name/artifact_key@a1b2c3",
+            "",
+            "project_name",
+            "artifact_key",
+            0,
+            None,
+            "a1b2c3",
+            None,
+        ),
+        (
+            "artifact_key#2:tag@us3jfdrkj",
+            "default",
+            "default",
+            "artifact_key",
+            2,
+            "tag",
+            "us3jfdrkj",
+            None,
+        ),
+        # New functionality: URI with uid
+        (
+            "artifact_key^uid123",
+            "default",
+            "default",
+            "artifact_key",
+            0,
+            None,
+            None,
+            "uid123",
+        ),
+        (
+            "project_name/artifact_key^uid123",
+            "",
+            "project_name",
+            "artifact_key",
+            0,
+            None,
+            None,
+            "uid123",
+        ),
+        (
+            "project_name/artifact_key#1:latest@branch^uid123",
+            "",
+            "project_name",
+            "artifact_key",
+            1,
+            "latest",
+            "branch",
+            "uid123",
+        ),
+        (
+            "artifact_key@branch^uid123",
+            "default",
+            "default",
+            "artifact_key",
+            0,
+            None,
+            "branch",
+            "uid123",
+        ),
+    ],
+)
+def test_parse_artifact_uri(
+    uri,
+    project,
+    expected_project,
+    expected_key,
+    expected_iteration,
+    expected_tag,
+    expected_tree,
+    expected_uid,
+):
+    result = parse_artifact_uri(uri, project)
+    assert result == (
+        expected_project,
+        expected_key,
+        expected_iteration,
+        expected_tag,
+        expected_tree,
+        expected_uid,
+    ), f"Failed to parse artifact URI: {uri}"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("a", does_not_raise()),
+        ("a_b", does_not_raise()),
+        ("_a_b", pytest.raises(mlrun.errors.MLRunInvalidArgumentError)),
+    ],
+)
+def test_validate_v3io_consumer_group(value, expected):
+    with expected:
+        validate_v3io_stream_consumer_group(
+            value,
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
         {
             "image": "mlrun/mlrun",
             "expected_output": "ghcr.io/mlrun/mlrun:0.5.2-unstable-adsf76s",
@@ -328,13 +542,17 @@ def test_enrich_image():
         {"image": "fake_mlrun/ml-models", "expected_output": "fake_mlrun/ml-models"},
         {"image": "some_repo/some_image", "expected_output": "some_repo/some_image"},
         {
+            "image": "python:3.9",
+            "expected_output": "dummy-repo/python:3.9",
+        },
+        {
             "image": "some-repo/some-image",
-            "expected_output": "ghcr.io/some-repo/some-image",
+            "expected_output": "dummy-repo/some-repo/some-image",
             "images_to_enrich_registry": "some-repo/some-image",
         },
         {
             "image": "some-repo/some-image:some-tag",
-            "expected_output": "ghcr.io/some-repo/some-image:some-tag",
+            "expected_output": "dummy-repo/some-repo/some-image:some-tag",
             "images_to_enrich_registry": "some-repo/some-image",
         },
         {
@@ -482,6 +700,15 @@ def test_enrich_image():
         },
         {
             "image": "mlrun/mlrun",
+            "client_version": "1.5.0",
+            "client_python_version": "3.7.13",
+            "images_tag": None,
+            "version": None,
+            "expected_output": "mlrun/mlrun:1.5.0",
+            "images_to_enrich_registry": "",
+        },
+        {
+            "image": "mlrun/mlrun",
             "client_version": "1.3.0",
             "client_python_version": None,
             "images_tag": None,
@@ -507,25 +734,27 @@ def test_enrich_image():
             "expected_output": "mlrun/mlrun:1.2.0",
             "images_to_enrich_registry": "",
         },
-    ]
+    ],
+)
+def test_enrich_image(case):
     default_images_to_enrich_registry = config.images_to_enrich_registry
-    for case in cases:
-        config.images_tag = case.get("images_tag", "0.5.2-unstable-adsf76s")
-        config.images_registry = case.get("images_registry", "ghcr.io/")
-        config.images_to_enrich_registry = case.get(
-            "images_to_enrich_registry", default_images_to_enrich_registry
+    config.images_tag = case.get("images_tag", "0.5.2-unstable-adsf76s")
+    config.images_registry = case.get("images_registry", "ghcr.io/")
+    config.vendor_images_registry = case.get("vendor_images_registry", "dummy-repo/")
+    config.images_to_enrich_registry = case.get(
+        "images_to_enrich_registry", default_images_to_enrich_registry
+    )
+    if case.get("version") is not None:
+        mlrun.utils.version.Version().get = unittest.mock.Mock(
+            return_value={"version": case["version"]}
         )
-        if case.get("version") is not None:
-            mlrun.utils.version.Version().get = unittest.mock.Mock(
-                return_value={"version": case["version"]}
-            )
-        config.images_tag = case.get("images_tag", "0.5.2-unstable-adsf76s")
-        image = case["image"]
-        expected_output = case["expected_output"]
-        client_version = case.get("client_version")
-        client_python_version = case.get("client_python_version")
-        output = enrich_image_url(image, client_version, client_python_version)
-        assert output == expected_output
+    config.images_tag = case.get("images_tag", "0.5.2-unstable-adsf76s")
+    image = case["image"]
+    expected_output = case["expected_output"]
+    client_version = case.get("client_version")
+    client_python_version = case.get("client_python_version")
+    output = enrich_image_url(image, client_version, client_python_version)
+    assert output == expected_output
 
 
 @pytest.mark.parametrize(
@@ -567,8 +796,9 @@ def test_resolve_image_tag_suffix(mlrun_version, python_version, expected):
     assert resolve_image_tag_suffix(mlrun_version, python_version) == expected
 
 
-def test_get_parsed_docker_registry():
-    cases = [
+@pytest.mark.parametrize(
+    "case",
+    [
         {"docker_registry": "", "expected_registry": "", "expected_repository": None},
         {
             "docker_registry": "hedi/ingber",
@@ -605,12 +835,13 @@ def test_get_parsed_docker_registry():
             "expected_registry": "quay.io",
             "expected_repository": "",
         },
-    ]
-    for case in cases:
-        config.httpdb.builder.docker_registry = case["docker_registry"]
-        registry, repository = get_parsed_docker_registry()
-        assert case["expected_registry"] == registry
-        assert case["expected_repository"] == repository
+    ],
+)
+def test_get_parsed_docker_registry(case):
+    config.httpdb.builder.docker_registry = case["docker_registry"]
+    registry, repository = get_parsed_docker_registry()
+    assert case["expected_registry"] == registry
+    assert case["expected_repository"] == repository
 
 
 @pytest.mark.parametrize(
@@ -638,15 +869,16 @@ def test_parse_store_uri(uri, expected_output):
     assert expected_output == output
 
 
-def test_fill_artifact_path_template():
-    cases = [
+@pytest.mark.parametrize(
+    "case",
+    [
         {
             "artifact_path": "v3io://just/regular/path",
             "expected_artifact_path": "v3io://just/regular/path",
         },
         {
             "artifact_path": "v3io://path-with-unrealted-template/{{run.uid}}",
-            "expected_artifact_path": "v3io://path-with-unrealted-template/{{run.uid}}",
+            "expected_artifact_path": "v3io://path-with-unrealted-template/project",
         },
         {
             "artifact_path": "v3io://template-project-not-provided/{{project}}",
@@ -662,16 +894,17 @@ def test_fill_artifact_path_template():
             "project": "some-project",
             "expected_artifact_path": "v3io://legacy-template-project-provided/some-project",
         },
-    ]
-    for case in cases:
-        if case.get("raise"):
-            with pytest.raises(mlrun.errors.MLRunInvalidArgumentError):
-                fill_artifact_path_template(case["artifact_path"], case.get("project"))
-        else:
-            filled_artifact_path = fill_artifact_path_template(
-                case["artifact_path"], case.get("project")
-            )
-            assert case["expected_artifact_path"] == filled_artifact_path
+    ],
+)
+def test_template_artifact_path(case):
+    if case.get("raise"):
+        with pytest.raises(mlrun.errors.MLRunInvalidArgumentError):
+            template_artifact_path(case["artifact_path"], case.get("project"))
+    else:
+        filled_artifact_path = template_artifact_path(
+            case["artifact_path"], case.get("project")
+        )
+        assert case["expected_artifact_path"] == filled_artifact_path
 
 
 def test_update_in():
@@ -828,7 +1061,6 @@ def test_create_step_backoff():
             for _ in range(0, step_occurrences):
                 assert step_value, next(backoff)
         else:
-
             # Run another 10 iterations:
             for _ in range(0, 10):
                 assert step_value, next(backoff)
@@ -872,3 +1104,278 @@ def test_retry_until_successful():
     test_run(0.02)
 
     test_run(mlrun.utils.create_linear_backoff(0.02, 0.02))
+
+
+@pytest.mark.parametrize(
+    "iterable_list, chunk_size, expected_chunked_list",
+    [
+        (["a", "b", "c"], 1, [["a"], ["b"], ["c"]]),
+        (["a", "b", "c"], 2, [["a", "b"], ["c"]]),
+        (["a", "b", "c"], 3, [["a", "b", "c"]]),
+        (["a", "b", "c"], 4, [["a", "b", "c"]]),
+        (["a", "b", "c"], 0, [["a", "b", "c"]]),
+    ],
+)
+def test_iterate_list_by_chunks(iterable_list, chunk_size, expected_chunked_list):
+    chunked_list = mlrun.utils.iterate_list_by_chunks(iterable_list, chunk_size)
+    assert list(chunked_list) == expected_chunked_list
+
+
+@pytest.mark.parametrize(
+    "username,expected_normalized_username",
+    [
+        # sanity, all good
+        ("test", "test"),
+        # ensure ends with alphanumeric
+        ("test.", "test"),
+        ("test-", "test"),
+        # lowercase
+        ("TestUser", "testuser"),
+        # remove special characters
+        ("UserName!@#$", "username"),
+        # dasherize
+        ("user_name", "user-name"),
+        ("User-Name_123", "user-name-123"),
+        # everything with @ (email-like username)
+        ("User_Name@domain.com", "user-name"),
+        ("user@domain.com", "user"),
+        ("user.name@example.com", "username"),
+        ("user_name@example.com", "user-name"),
+    ],
+)
+def test_normalize_username(username, expected_normalized_username):
+    normalized_username = mlrun.utils.helpers.normalize_project_username(username)
+    assert normalized_username == expected_normalized_username
+
+
+@pytest.mark.parametrize(
+    "basedir,path,is_symlink, is_valid",
+    [
+        ("/base", "/base/valid", False, True),
+        ("/base", "/base/valid", True, True),
+        ("/base", "/../invalid", True, False),
+        ("/base", "/../invalid", False, False),
+    ],
+)
+def test_is_safe_path(basedir, path, is_symlink, is_valid):
+    safe = mlrun.utils.is_safe_path(basedir, path, is_symlink)
+    assert safe == is_valid
+
+
+@pytest.mark.parametrize(
+    "kind, tag, target_path, uid, expected",
+    [
+        (
+            "artifact",
+            "v1",
+            "/path/to/artifact",
+            None,
+            f"{ARTIFACT_STORE_PREFIX}:v1@dummy-tree",
+        ),
+        (
+            "artifact",
+            None,
+            "/path/to/artifact",
+            "dummy-uid",
+            f"{ARTIFACT_STORE_PREFIX}:latest@dummy-tree^dummy-uid",
+        ),
+        (
+            "artifact",
+            "latest",
+            "/path/to/artifact",
+            "dummy-uid",
+            f"{ARTIFACT_STORE_PREFIX}:latest@dummy-tree^dummy-uid",
+        ),
+        (
+            "dataset",
+            "v1",
+            "/path/to/artifact",
+            None,
+            f"{DATASET_STORE_PREFIX}:v1@dummy-tree",
+        ),
+        (
+            "dataset",
+            None,
+            "/path/to/artifact",
+            None,
+            f"{DATASET_STORE_PREFIX}:latest@dummy-tree",
+        ),
+        (
+            "dataset",
+            None,
+            "/path/to/artifact",
+            "dummy-uid",
+            f"{DATASET_STORE_PREFIX}:latest@dummy-tree^dummy-uid",
+        ),
+        (
+            "dataset",
+            "latest",
+            "/path/to/artifact",
+            None,
+            f"{DATASET_STORE_PREFIX}:latest@dummy-tree",
+        ),
+        (
+            "model",
+            "v1",
+            "/path/to/artifact",
+            "dummy-uid",
+            f"{MODEL_STORE_PREFIX}:v1@dummy-tree^dummy-uid",
+        ),
+        (
+            "model",
+            None,
+            "/path/to/artifact",
+            None,
+            f"{MODEL_STORE_PREFIX}:latest@dummy-tree",
+        ),
+        (
+            "model",
+            "latest",
+            "/path/to/artifact",
+            "dummy-uid",
+            f"{MODEL_STORE_PREFIX}:latest@dummy-tree^dummy-uid",
+        ),
+        ("dir", "v1", "/path/to/artifact", "dummy-uid", "/path/to/artifact"),
+        ("table", "v1", "/path/to/artifact", "dummy-uid", "/path/to/artifact"),
+        ("plot", "v1", "/path/to/artifact", "dummy-uid", "/path/to/artifact"),
+    ],
+)
+def test_get_artifact_target(kind, tag, target_path, uid, expected):
+    item = {
+        "kind": kind,
+        "spec": {
+            "db_key": "dummy-db-key",
+            "target_path": target_path,
+        },
+        "metadata": {"tree": "dummy-tree", "tag": tag, "uid": uid},
+    }
+    target = mlrun.utils.get_artifact_target(item, project="dummy-project")
+    assert target == expected
+
+
+def test_validate_single_def_handler_invalid_handler():
+    code = """
+def handler():
+    pass
+def handler():
+    pass
+"""
+    with pytest.raises(mlrun.errors.MLRunInvalidArgumentError) as exc:
+        mlrun.utils.validate_single_def_handler("mlrun", code)
+    assert str(exc.value) == (
+        "The code file contains a function named “handler“, which is reserved. "
+        + "Use a different name for your function."
+    )
+
+
+@pytest.mark.parametrize(
+    "obj, expected",
+    [
+        ({"a": 1, "b": 2}, {"a": 1, "b": 2}),
+        ('{"a": 1, "b": 2}', {"a": 1, "b": 2}),
+        ({}, {}),
+        ("{}", {}),
+        (None, None),
+    ],
+)
+def test_as_dict(obj, expected):
+    assert expected == mlrun.utils.helpers.as_dict(obj)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        """
+def dummy_handler():
+    pass
+def handler():
+    pass
+""",
+        """
+def handler():
+    pass
+""",
+        """
+def handler():
+    pass
+def dummy_handler():
+    def handler():
+        pass
+    handler()
+""",
+        """
+# def handler():
+#     pass
+def handler():
+    pass
+""",
+    ],
+)
+def test_validate_single_def_handler_valid_handler(code):
+    try:
+        mlrun.utils.validate_single_def_handler("mlrun", code)
+    except mlrun.errors.MLRunInvalidArgumentError:
+        pytest.fail(
+            "validate_single_def_handler raised MLRunInvalidArgumentError unexpectedly."
+        )
+
+
+@pytest.mark.parametrize(
+    "base_url, path, expected_result",
+    [
+        # Base URL without trailing slash
+        (
+            "http://example.com",
+            "path/to/resource",
+            "http://example.com/path/to/resource",
+        ),
+        (
+            "http://example.com",
+            "/path/to/resource",
+            "http://example.com/path/to/resource",
+        ),
+        ("http://example.com", "", "http://example.com"),
+        ("http://example.com", None, "http://example.com"),
+        # Base URL with trailing slash
+        (
+            "http://example.com/",
+            "path/to/resource",
+            "http://example.com/path/to/resource",
+        ),
+        (
+            "http://example.com/",
+            "/path/to/resource",
+            "http://example.com/path/to/resource",
+        ),
+        ("http://example.com/", "", "http://example.com/"),
+        ("http://example.com/", None, "http://example.com/"),
+        # Path with or without leading slash
+        ("http://example.com", "path", "http://example.com/path"),
+        ("http://example.com/", "/path", "http://example.com/path"),
+        ("http://example.com", "/path", "http://example.com/path"),
+        # Complex cases
+        (
+            "http://example.com/base",
+            "subpath/resource",
+            "http://example.com/base/subpath/resource",
+        ),
+        (
+            "http://example.com/base/",
+            "/subpath/resource",
+            "http://example.com/base/subpath/resource",
+        ),
+        # Empty base_url
+        (
+            "",
+            "/path",
+            "/path",
+        ),
+        (
+            None,
+            "/path",
+            "/path",
+        ),
+    ],
+)
+def test_join_urls(base_url, path, expected_result):
+    assert mlrun.utils.helpers.join_urls(base_url, path) == expected_result

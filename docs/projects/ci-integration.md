@@ -1,11 +1,11 @@
 (ci-integration)=
-# CI/CD integration
+# Run pipelines with GitHub Actions, GitLab
 
-You can run your ML Pipelines using CI frameworks like Github Actions, GitLab CI/CD, etc. MLRun supports a simple and native integration 
+You can run your ML Pipelines using CI frameworks like GitHub Actions, GitLab CI/CD, etc. MLRun supports a simple and native integration 
 with the CI systems. 
 
 - Build/run complex workflows composed of local/library functions or external cloud services (e.g. AutoML)
-- Support various Pipeline/CI engines (Kubeflow, GitHub, Gitlab, Jenkins)
+- Support various Pipeline/CI engines (Kubeflow, GitHub, GitLab, Jenkins)
 - Track & version code, data, params, results with minimal effort
 - Elastic scaling of each step
 - Extensive Function Hub
@@ -20,18 +20,18 @@ pipeline it detects the environment attributes automatically
 * **MLRUN_DBPATH** &mdash; url of the MLRun cluster.
 * **V3IO_USERNAME** &mdash; username in the remote Iguazio cluster.
 * **V3IO_ACCESS_KEY** &mdash; access key to the remote Iguazio cluster.
-* **GIT_TOKEN** or **GITHUB_TOKEN** &mdash; Github/Gitlab API token (set automatically in Github Actions).
-* **SLACK_WEBHOOK** &mdash; optional. Slack API key when using slack notifications.
+* **GIT_TOKEN** or **GITHUB_TOKEN** &mdash; GitHub/GitLab API token (set automatically in GitHub Actions).
+* **SLACK_WEBHOOK** &mdash; optional. Slack API key when using Slack notifications.
 
 When the workflow runs inside the Git CI system it reports the pipeline progress and results back into the Git tracking system, similar to:
 
 <img src="../_static/images/git-pipeline.png" alt="mlrun-architecture" width="800"/><br>
 
-When working with a private Git repository, you need to create **GIT_TOKEN** secrets. For more details about creating secrets in mlrun see [MLRun-managed secrets](../secrets.html#mlrun-managed-secrets).
+When working with a private Git repository, you need to create **GIT_TOKEN** secrets. For more details about creating secrets in mlrun see [MLRun-managed secrets](../secrets.md#mlrun-managed-secrets).
 
 **Contents**
 * [**Using GitHub Actions**](#using-github-actions)
-* [**Using GitLab CI/CD**](#using-gitlab-ci-cd)
+* [**Using GitLab CI/CD**](#using-gitlab-cicd)
 * [**Using Jenkins Pipeline**](#using-jenkins-pipeline)
 
 ## Using GitHub Actions
@@ -52,10 +52,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Set up Python 3.7
+    - name: Set up Python 3.9
       uses: actions/setup-python@v4
       with:
-        python-version: '3.7'
+        python-version: '3.9'
         architecture: 'x64'
     
     - name: Install mlrun
@@ -122,7 +122,7 @@ pipeline {
             }
             agent {
                 docker {
-                    image 'mlrun/mlrun:1.3.0'
+                    image 'mlrun/mlrun:1.7.0'
                 }
             }
             steps {
